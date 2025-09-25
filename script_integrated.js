@@ -42,10 +42,16 @@ class MarkupScreenshotter {
     const logMessage = `[${timestamp}] ${prefix} ${message}`;
     console.log(logMessage);
     
-    // Log to Supabase asynchronously (don't await to avoid blocking)
-    if (this.supabaseService && this.sessionId) {
-      this.supabaseService.log(level, message).catch(err => {
-        console.error('Failed to log to Supabase:', err.message);
+    // Log errors to Supabase with context for manual retriggering
+    if (this.supabaseService && this.sessionId && level === 'error') {
+      const context = {
+        url: this.currentUrl,
+        title: this.currentTitle,
+        numberOfImages: this.options.numberOfImages,
+        options: this.options
+      };
+      this.supabaseService.log(level, message, null, context).catch(err => {
+        console.error('Failed to log error to Supabase:', err.message);
       });
     }
   }
@@ -452,9 +458,6 @@ class MarkupScreenshotter {
       } catch (error) {
         this.log(`Failed to capture image ${imageIndex}: ${error.message}`, 'error');
         
-        // Take a diagnostic screenshot
-        await this.takeScreenshot(`image_${imageIndex}_error.jpg`).catch(() => {});
-        
         if (this.options.numberOfImages > 2) {
           this.log('Continuing with next image...', 'warn');
           continue;
@@ -593,28 +596,19 @@ class MarkupScreenshotter {
     } catch (error) {
       this.log(`❌ Screenshot capture failed: ${error.message}`, 'error');
       
-      // Take error screenshot if possible
-      try {
-        if (this.page) {
-          await this.takeScreenshot('error_state.jpg');
-        }
-      } catch (e) {
-        // Ignore screenshot errors during error handling
-      }
-      
       const result = {
         success: false,
         url: this.currentUrl,
         title: this.currentTitle,
         error: error.message,
-        numberOfImages: this.screenshots.length,
-        screenshots: this.screenshots.map(s => s.filename), // Return filenames for compatibility
-        metadata: this.getScreenshotMetadata(),
+        numberOfImages: 0, // No images captured on error
+        screenshots: [], // No screenshots on error
+        metadata: [], // No metadata on error
         options: this.options,
         supabaseUrls: [] // Empty for failed attempts
       };
 
-      // Save failed scraping data to Supabase
+      // Save failed scraping data to Supabase (no screenshots)
       try {
         await this.supabaseService.saveFailedScraping(result);
         this.log('Failed scraping data saved to Supabase', 'info');

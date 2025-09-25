@@ -30,21 +30,28 @@ class SupabaseService {
   }
 
   async log(level, message, errorDetails = null, context = null) {
-    try {
-      const logEntry = {
-        session_id: this.currentSessionId,
-        level,
-        message,
-        error_details: errorDetails,
-        context,
-        timestamp: new Date().toISOString(),
-      };
+    // Only log errors to database for manual retriggering
+    if (level === 'error') {
+      try {
+        const errorLogEntry = {
+          session_id: this.currentSessionId,
+          url: context?.url || null,
+          title: context?.title || null,
+          error_message: message,
+          number_of_images: context?.numberOfImages || null,
+          error_details: { error: message }, // Minimal error details
+          options: context?.options || null,
+          failed_at: new Date().toISOString(),
+          status: 'failed'
+        };
 
-      const { error } = await this.supabase.from('scraping_logs').insert([logEntry]);
-      if (error) console.error('Failed to save log to database:', error);
-    } catch (error) {
-      console.error('Error saving log to database:', error);
+        const { error } = await this.supabase.from('scraping_error_logs').insert([errorLogEntry]);
+        if (error) console.error('Failed to save error log to database:', error);
+      } catch (error) {
+        console.error('Error saving error log to database:', error);
+      }
     }
+    // All other log levels are just console output
   }
 
   /**
@@ -140,28 +147,43 @@ class SupabaseService {
   }
 
   /**
-   * Save failed scraping - only logs error message, no screenshots
+   * Save failed scraping - minimal data for manual retriggering
    */
   async saveFailedScraping(data) {
     try {
-      // Only save error log message, no screenshots for failed scraping
-      await this.log('error', `Scraping failed for URL: ${data.url}`, {
-        error: data.error,
-        duration: data.duration || 0,
-        options: data.options
-      });
+      // Save only essential info to error logs table for manual retriggering
+      const errorLogEntry = {
+        session_id: this.currentSessionId,
+        url: data.url,
+        title: data.title,
+        error_message: data.error,
+        number_of_images: data.options?.numberOfImages || 0,
+        error_details: {
+          error: data.error
+        },
+        options: data.options, // Keep options for exact retry
+        failed_at: new Date().toISOString(),
+        status: 'failed'
+      };
 
-      return { success: false, logged: true };
+      const { error } = await this.supabase.from('scraping_error_logs').insert([errorLogEntry]);
+      if (error) {
+        console.error('Failed to save error log to database:', error);
+        return { success: false, logged: false };
+      }
+
+      console.log('Failed scraping saved to error logs for manual retriggering');
+      return { success: true, logged: true };
     } catch (error) {
-      await this.log('error', 'Error in saveFailedScraping method', { error: error.message });
-      throw error;
+      console.error('Error in saveFailedScraping method:', error.message);
+      return { success: false, logged: false };
     }
   }
 
   async getRecentActivities(limit = 10) {
     try {
       const { data, error } = await this.supabase
-        .from('recent_scraping_activities')
+        .from('scraped_data')
         .select('*')
         .order('scraping_timestamp', { ascending: false })
         .limit(limit);
@@ -169,7 +191,62 @@ class SupabaseService {
       if (error) throw new Error(`Failed to fetch recent activities: ${error.message}`);
       return data;
     } catch (error) {
-      await this.log('error', 'Error fetching recent activities', { error: error.message });
+      console.error('Error fetching recent activities:', error.message);
+      throw error;
+    }
+  }
+
+  async getFailedScrapings(limit = 50, status = 'failed') {
+    try {
+      const { data, error } = await this.supabase
+        .from('scraping_error_logs')
+        .select('*')
+        .eq('status', status)
+        .order('failed_at', { ascending: false })
+        .limit(limit);
+
+      if (error) throw new Error(`Failed to fetch failed scrapings: ${error.message}`);
+      return data;
+    } catch (error) {
+      console.error('Error fetching failed scrapings:', error.message);
+      throw error;
+    }
+  }
+
+  async markErrorForRetry(errorId) {
+    try {
+      const { data, error } = await this.supabase
+        .from('scraping_error_logs')
+        .update({ 
+          status: 'retrying',
+          retry_count: this.supabase.raw('retry_count + 1'),
+          last_retry_at: new Date().toISOString()
+        })
+        .eq('id', errorId)
+        .select()
+        .single();
+
+      if (error) throw new Error(`Failed to mark error for retry: ${error.message}`);
+      return data;
+    } catch (error) {
+      console.error('Error marking for retry:', error.message);
+      throw error;
+    }
+  }
+
+  async markErrorAsResolved(errorId) {
+    try {
+      const { data, error } = await this.supabase
+        .from('scraping_error_logs')
+        .update({ status: 'resolved' })
+        .eq('id', errorId)
+        .select()
+        .single();
+
+      if (error) throw new Error(`Failed to mark error as resolved: ${error.message}`);
+      return data;
+    } catch (error) {
+      console.error('Error marking as resolved:', error.message);
       throw error;
     }
   }
@@ -177,10 +254,10 @@ class SupabaseService {
   async getSessionLogs(sessionId) {
     try {
       const { data, error } = await this.supabase
-        .from('scraping_logs')
+        .from('scraping_error_logs')
         .select('*')
         .eq('session_id', sessionId)
-        .order('timestamp', { ascending: true });
+        .order('failed_at', { ascending: true });
 
       if (error) throw new Error(`Failed to fetch session logs: ${error.message}`);
       return data;
@@ -205,23 +282,26 @@ class SupabaseService {
       const cutoffDate = new Date();
       cutoffDate.setDate(cutoffDate.getDate() - daysOld);
 
+      // Clean up resolved error logs older than specified days
       const { error } = await this.supabase
-        .from('scraping_logs')
+        .from('scraping_error_logs')
         .delete()
-        .lt('timestamp', cutoffDate.toISOString());
+        .eq('status', 'resolved')
+        .lt('failed_at', cutoffDate.toISOString());
 
       if (error) {
-        await this.log('error', 'Failed to cleanup old logs', error);
+        console.error('Failed to cleanup old error logs:', error);
         return false;
       }
 
-      await this.log('info', `Successfully cleaned up logs older than ${daysOld} days`);
+      console.log(`Successfully cleaned up resolved error logs older than ${daysOld} days`);
       return true;
     } catch (error) {
-      await this.log('error', 'Error during log cleanup', { error: error.message });
+      console.error('Error during log cleanup:', error.message);
       return false;
     }
   }
 }
 
 module.exports = SupabaseService;
+
