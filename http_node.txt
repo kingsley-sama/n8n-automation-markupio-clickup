@@ -1,5 +1,0 @@
-curl https://api.markup.io/api/v2/webhook-registrations \
-    -X GET \
-    -H "Authorization: Bearer sk_8ed7fe4a-7833-4cf5-bad2-dd19b0310422_707aa1d9a63b2cb756510317f9cfab2f3d0c8f618a54a1b6a6c95f24ac8345680fa227982a084ae7c992dfa7096cc60d79ba1a67a2cf6f1d7efdf5a7316ef73e" \
-    -H "Content-Type: application/json" \
-    -H "Markup-API-Version: 2023-02-22"

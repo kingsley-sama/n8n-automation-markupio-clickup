@@ -1,5 +1,4 @@
 const { createClient } = require('@supabase/supabase-js');
-const fs = require('fs');
 const path = require('path');
 require('dotenv').config();
 
@@ -50,17 +49,19 @@ class SupabaseService {
 
   /**
    * Upload a single screenshot to Supabase Storage
+   * @param {Buffer} fileBuffer - The screenshot buffer
+   * @param {string} filename - The filename for the screenshot
+   * @param {string} contentType - The content type (default: 'image/jpeg')
    */
-  async uploadScreenshot(filePath) {
+  async uploadScreenshot(fileBuffer, filename, contentType = 'image/jpeg') {
     try {
-      const fileBuffer = fs.readFileSync(filePath);
-      const fileExt = path.extname(filePath) || '.png';
-      const fileName = `${this.currentSessionId}/${Date.now()}-${path.basename(filePath, fileExt)}${fileExt}`;
+      const fileExt = path.extname(filename) || '.jpg';
+      const fileName = `${this.currentSessionId}/${Date.now()}-${path.basename(filename, fileExt)}${fileExt}`;
 
       const { data, error } = await this.supabase.storage
         .from(this.bucketName)
         .upload(fileName, fileBuffer, {
-          contentType: 'image/png', // adjust if jpg
+          contentType: contentType,
           upsert: true,
         });
 
@@ -88,9 +89,17 @@ class SupabaseService {
     try {
       // Upload screenshots to Supabase Storage
       const uploadedPaths = [];
-      for (const localPath of data.screenshots || []) {
-        const uploadedPath = await this.uploadScreenshot(localPath);
-        uploadedPaths.push(uploadedPath);
+      
+      // Handle new screenshot format with buffers
+      if (data.screenshotBuffers && Array.isArray(data.screenshotBuffers)) {
+        for (const screenshot of data.screenshotBuffers) {
+          const uploadedPath = await this.uploadScreenshot(
+            screenshot.buffer, 
+            screenshot.filename, 
+            'image/jpeg'
+          );
+          uploadedPaths.push(uploadedPath);
+        }
       }
 
       const scrapingRecord = {
@@ -118,7 +127,12 @@ class SupabaseService {
       }
 
       await this.log('success', `Successfully saved scraped data with ${uploadedPaths.length} screenshots`);
-      return insertedData;
+      
+      // Return the inserted data with uploaded URLs
+      return {
+        ...insertedData,
+        uploadedUrls: uploadedPaths
+      };
     } catch (error) {
       await this.log('error', 'Error in saveScrapedData method', { error: error.message });
       throw error;

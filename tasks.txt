@@ -1,9 +1,0 @@
-i set up the http nodes to connect to markup.io
-I explored the possible approaches when it comes to setting up a workflow for the image.
-    while selenium could work. it is not quite assured due to it's requiring browser using  
-    other tools I discovered where puppeteer 
-    and i got 2 platforms which were getscreenshot and screenshot.io they both provide apis for taking screenshot of webs pages
-    and i was able to get a demo. but then there are other constraints also being that in a case where there are multiple images on the page 
-    we need to deal with the software manually clicking to reveal the next image. but if there is possibility for for that which there might be because i was in talks with their support as to what is possible with their api and he gave me a good amount of informations
-    another aproach i will explore is to use a script coupled with a webscrapper like selenium and maybe manually plot the points on the image bite using a stable tool like canvas. this seems most stable
-    but would require code and also 

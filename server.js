@@ -208,70 +208,6 @@ app.post('/diagnose', async (req, res) => {
   }
 });
 
-// Webhook endpoint for n8n integration
-app.post('/webhook/capture', async (req, res) => {
-  try {
-    console.log('📡 Webhook received:', {
-      headers: req.headers,
-      body: req.body,
-      query: req.query
-    });
-
-    // Extract URL from various possible sources
-    const url = req.body.url || req.query.url || req.body.data?.url;
-    const numberOfImages = req.body.numberOfImages || req.query.numberOfImages || req.body.data?.numberOfImages || 1;
-    const options = req.body.options || req.body.data?.options || {};
-
-    if (!url) {
-      return res.status(400).json({
-        success: false,
-        error: 'Missing required parameter: url',
-        message: 'Webhook payload must include a URL field',
-        received: {
-          body: req.body,
-          query: req.query
-        }
-      });
-    }
-
-    const captureOptions = {
-      outputDir: process.env.SCRAPER_OUTPUT_DIR || './screenshots',
-      timeout: parseInt(process.env.SCRAPER_TIMEOUT) || 60000,
-      retryAttempts: parseInt(process.env.SCRAPER_RETRY_ATTEMPTS) || 3,
-      debugMode: process.env.SCRAPER_DEBUG_MODE === 'true' || false,
-      waitForFullscreen: true,
-      screenshotQuality: 90,
-      ...options
-    };
-
-    console.log(`📸 Webhook - Starting screenshot capture for: ${url}`);
-    
-    const result = await captureMarkupScreenshots(url, parseInt(numberOfImages), captureOptions);
-    
-    // Always return 200 for webhooks, but include success status in body
-    res.status(200).json({
-      success: result.success,
-      data: result,
-      webhook: true,
-      message: result.success ? 
-        `Successfully captured ${result.numberOfImages} screenshots` : 
-        'Screenshot capture failed',
-      timestamp: new Date().toISOString()
-    });
-
-  } catch (error) {
-    console.error('Webhook error:', error);
-    // Always return 200 for webhooks to prevent retries
-    res.status(200).json({
-      success: false,
-      error: error.message,
-      webhook: true,
-      message: 'Webhook processing failed',
-      timestamp: new Date().toISOString()
-    });
-  }
-});
-
 // API documentation endpoint
 app.get('/', (req, res) => {
   const docs = {
@@ -282,7 +218,6 @@ app.get('/', (req, res) => {
       'GET /capture': 'Simple screenshot capture via query parameters',
       'POST /capture': 'Advanced screenshot capture with JSON payload',
       'POST /diagnose': 'Run diagnostic capture with debug information',
-      'POST /webhook/capture': 'Webhook endpoint for n8n integration',
       'GET /': 'This documentation'
     },
     examples: {
@@ -295,10 +230,6 @@ app.get('/', (req, res) => {
           screenshotQuality: 90,
           waitForFullscreen: true
         }
-      },
-      'Webhook payload': {
-        url: 'https://app.markup.io/markup/bb3022bd-01f0-4ed5-8fbb-1c5da2e3bdc7',
-        numberOfImages: 1
       }
     },
     environment: {
@@ -327,7 +258,7 @@ app.use((req, res) => {
     success: false,
     error: 'Not Found',
     message: `Endpoint ${req.method} ${req.path} not found`,
-    availableEndpoints: ['/', '/health', '/capture', '/diagnose', '/webhook/capture'],
+    availableEndpoints: ['/', '/health', '/capture', '/diagnose'],
     timestamp: new Date().toISOString()
   });
 });
@@ -338,7 +269,6 @@ app.listen(PORT, () => {
   console.log(`📋 Documentation available at: http://localhost:${PORT}/`);
   console.log(`💚 Health check: http://localhost:${PORT}/health`);
   console.log(`📸 Capture endpoint: http://localhost:${PORT}/capture`);
-  console.log(`🪝 Webhook endpoint: http://localhost:${PORT}/webhook/capture`);
   console.log('');
   console.log('Example usage:');
   console.log(`curl -X POST http://localhost:${PORT}/capture \\`);

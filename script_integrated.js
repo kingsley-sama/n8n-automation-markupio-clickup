@@ -1,6 +1,4 @@
 const puppeteer = require('puppeteer');
-const fs = require('fs').promises;
-const path = require('path');
 const SupabaseService = require('./supabase-service');
 require('dotenv').config();
 
@@ -9,7 +7,6 @@ class MarkupScreenshotter {
     this.options = {
       // Default configuration optimized for ClickUp integration
       numberOfImages: 1,
-      outputDir: process.env.SCRAPER_OUTPUT_DIR || './screenshots',
       timeout: parseInt(process.env.SCRAPER_TIMEOUT) || 60000,
       retryAttempts: parseInt(process.env.SCRAPER_RETRY_ATTEMPTS) || 3,
       retryDelay: 2000,
@@ -110,15 +107,7 @@ class MarkupScreenshotter {
     this.log('Browser initialized successfully', 'success');
   }
 
-  async createOutputDirectory() {
-    try {
-      await fs.mkdir(this.options.outputDir, { recursive: true });
-      this.log(`Output directory created: ${this.options.outputDir}`, 'success');
-    } catch (error) {
-      this.log(`Failed to create output directory: ${error.message}`, 'error');
-      throw error;
-    }
-  }
+
 
   async navigateToPage(url) {
     this.currentUrl = url;
@@ -335,35 +324,38 @@ class MarkupScreenshotter {
   async takeScreenshot(filename) {
     // Use JPEG extension for better ClickUp compatibility
     const jpegFilename = filename.replace(/\.png$/i, '.jpg');
-    const screenshotPath = path.join(this.options.outputDir, jpegFilename);
     
     await this.retry(async () => {
       // Wait for any animations to complete
       await this.delay(1000);
       
       const screenshotOptions = {
-        path: screenshotPath,
         type: 'jpeg',
         quality: this.options.screenshotQuality,
         fullPage: this.options.fullPage
       };
       
-      await this.page.screenshot(screenshotOptions);
+      const screenshotBuffer = await this.page.screenshot(screenshotOptions);
       
-      // Verify screenshot was created
-      const stats = await fs.stat(screenshotPath);
-      if (stats.size < 1000) { // Less than 1KB is probably an error
-        throw new Error('Screenshot file is too small, possible capture error');
+      // Verify screenshot was captured
+      if (!screenshotBuffer || screenshotBuffer.length < 1000) { // Less than 1KB is probably an error
+        throw new Error('Screenshot buffer is too small, possible capture error');
       }
       
-      // Log file size for monitoring
-      const fileSizeKB = (stats.size / 1024).toFixed(1);
-      this.log(`Screenshot size: ${fileSizeKB} KB`, 'info');
+      // Log buffer size for monitoring
+      const fileSizeKB = (screenshotBuffer.length / 1024).toFixed(1);
+      this.log(`Screenshot captured: ${fileSizeKB} KB`, 'info');
+      
+      // Store screenshot data with metadata
+      this.screenshots.push({
+        filename: jpegFilename,
+        buffer: screenshotBuffer,
+        size: screenshotBuffer.length
+      });
       
     }, `Screenshot capture: ${jpegFilename}`);
     
-    this.screenshots.push(screenshotPath);
-    this.log(`Screenshot saved: ${screenshotPath}`, 'success');
+    this.log(`Screenshot captured: ${jpegFilename}`, 'success');
   }
 
   async navigateToNextImage(imageIndex) {
@@ -502,9 +494,8 @@ class MarkupScreenshotter {
         };
       });
       
-      const diagnosticPath = path.join(this.options.outputDir, 'diagnostic_info.json');
-      await fs.writeFile(diagnosticPath, JSON.stringify(diagnosticData, null, 2));
-      this.log(`Diagnostic info saved: ${diagnosticPath}`, 'success');
+      // Log diagnostic info to console and Supabase (via the log method)
+      this.log(`Diagnostic info: ${JSON.stringify(diagnosticData, null, 2)}`, 'debug');
       
     } catch (error) {
       this.log(`Failed to generate diagnostic info: ${error.message}`, 'warn');
@@ -524,13 +515,13 @@ class MarkupScreenshotter {
 
   // Method to get screenshot metadata (useful for ClickUp integration)
   getScreenshotMetadata() {
-    return this.screenshots.map(screenshotPath => {
-      const filename = path.basename(screenshotPath);
+    return this.screenshots.map((screenshot, index) => {
       return {
-        path: screenshotPath,
-        filename: filename,
+        filename: screenshot.filename,
         format: 'jpeg',
-        quality: this.options.screenshotQuality
+        quality: this.options.screenshotQuality,
+        size: screenshot.size,
+        sizeKB: (screenshot.size / 1024).toFixed(1)
       };
     });
   }
@@ -546,7 +537,6 @@ class MarkupScreenshotter {
       this.log(`Starting screenshot capture for ${this.options.numberOfImages} images...`);
       
       // Initialize
-      await this.createOutputDirectory();
       await this.initializeBrowser();
       
       // Navigate and prepare page
@@ -569,23 +559,29 @@ class MarkupScreenshotter {
       const duration = ((endTime - startTime) / 1000).toFixed(2);
       
       this.log(`✅ Successfully captured ${this.screenshots.length} screenshots in ${duration}s`, 'success');
-      this.log(`Screenshots saved to: ${this.options.outputDir}`, 'info');
+      this.log(`Screenshots captured and ready for Supabase upload`, 'info');
       
       const result = {
         success: true,
         url: this.currentUrl,
         title: this.currentTitle,
         numberOfImages: this.screenshots.length,
-        screenshots: this.screenshots,
+        screenshots: this.screenshots.map(s => s.filename), // Return filenames for compatibility
         metadata: this.getScreenshotMetadata(),
         duration: parseFloat(duration),
         options: this.options,
-        message: `Successfully captured ${this.screenshots.length} images`
+        message: `Successfully captured ${this.screenshots.length} images`,
+        supabaseUrls: [] // Will be populated after Supabase upload
       };
 
-      // Save successful scraping data to Supabase
+      // Save successful scraping data to Supabase and get URLs
       try {
-        await this.supabaseService.saveScrapedData(result);
+        const supabaseResult = await this.supabaseService.saveScrapedData({
+          ...result,
+          screenshotBuffers: this.screenshots
+        });
+        result.supabaseUrls = supabaseResult.uploadedUrls || [];
+        result.sessionId = this.sessionId;
         this.log('Scraping data saved to Supabase successfully', 'success');
       } catch (dbError) {
         this.log(`Failed to save to Supabase: ${dbError.message}`, 'error');
@@ -612,9 +608,10 @@ class MarkupScreenshotter {
         title: this.currentTitle,
         error: error.message,
         numberOfImages: this.screenshots.length,
-        screenshots: this.screenshots,
+        screenshots: this.screenshots.map(s => s.filename), // Return filenames for compatibility
         metadata: this.getScreenshotMetadata(),
-        options: this.options
+        options: this.options,
+        supabaseUrls: [] // Empty for failed attempts
       };
 
       // Save failed scraping data to Supabase
@@ -666,7 +663,6 @@ async function main() {
 
   const config = {
     numberOfImages: 2, // Change this to your desired number
-    outputDir: process.env.SCRAPER_OUTPUT_DIR || './screenshots',
     timeout: parseInt(process.env.SCRAPER_TIMEOUT) || 60000,
     retryAttempts: parseInt(process.env.SCRAPER_RETRY_ATTEMPTS) || 3,
     debugMode: process.env.SCRAPER_DEBUG_MODE === 'true' || false,
@@ -680,18 +676,18 @@ async function main() {
   
   if (result.success) {
     console.log(`\n🎉 SUCCESS: ${result.message}`);
-    console.log(`📁 Screenshots: ${result.screenshots.join(', ')}`);
+    console.log(`� Screenshots captured: ${result.screenshots.join(', ')}`);
     console.log(`⏱️  Duration: ${result.duration}s`);
     console.log(`💾 Data saved to Supabase with session ID: ${result.sessionId || 'Unknown'}`);
     
     // Display metadata useful for ClickUp integration
     result.metadata.forEach((meta, index) => {
-      console.log(`📷 Image ${index + 1}: ${meta.filename} (${meta.format}, quality: ${meta.quality})`);
+      console.log(`📷 Image ${index + 1}: ${meta.filename} (${meta.format}, quality: ${meta.quality}, size: ${meta.sizeKB}KB)`);
     });
   } else {
     console.error(`\n💥 FAILED: ${result.error}`);
     if (result.screenshots.length > 0) {
-      console.log(`📁 Partial screenshots: ${result.screenshots.join(', ')}`);
+      console.log(`� Partial screenshots captured: ${result.screenshots.join(', ')}`);
     }
     console.log(`💾 Error details saved to Supabase`);
     process.exit(1);

@@ -1,7 +1,0 @@
-{
-  "HTTP Method": "POST",
-  "Path": "markup-webhook",
-  "Response Mode": "onReceived",
-  "Response Code": 200,
-  "Response Data": "success"
-}
