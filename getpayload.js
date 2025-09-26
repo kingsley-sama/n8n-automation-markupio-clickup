@@ -33,6 +33,25 @@ async function scrapeMarkupThreads(url = 'https://app.markup.io/markup/6039b445-
     });
     console.log('✅ Page loaded successfully');
 
+    // Extract project name from note__heading
+    console.log('🔍 Extracting project name...');
+    const projectName = await page.evaluate(() => {
+      // Look for p tag with class note__heading that's a child of element with class note
+      const noteElement = document.querySelector('.note');
+      if (noteElement) {
+        const headingElement = noteElement.querySelector('p.note__heading');
+        if (headingElement) {
+          return headingElement.textContent.trim();
+        }
+      }
+      
+      // Fallback: try to find note__heading anywhere on the page
+      const headingElement = document.querySelector('p.note__heading');
+      return headingElement ? headingElement.textContent.trim() : null;
+    });
+    
+    console.log(`✅ Project name extracted: ${projectName || 'Not found'}`);
+
     // Wait for the thread list to load
     console.log('⏳ Waiting for thread list to load...');
     await page.waitForSelector('div.thread-list', { timeout: 30000 }); // Increased to 30 seconds
@@ -299,6 +318,7 @@ async function scrapeMarkupThreads(url = 'https://app.markup.io/markup/6039b445-
     // Convert to the required structure format
     console.log('📊 Formatting data structure...');
     const formattedData = {
+      "projectName": projectName || "Unknown Project",
       "threads": Object.keys(threads).map(threadName => ({
         "threadName": threadName,
         "comments": threads[threadName]
@@ -324,6 +344,25 @@ async function extractThreadDataFromPage(page) {
   console.log('⏳ Waiting for thread list to load...');
   await page.waitForSelector('div.thread-list', { timeout: 30000 });
   console.log('✅ Thread list loaded successfully');
+
+  // Extract project name from note__heading
+  console.log('🔍 Extracting project name...');
+  const projectName = await page.evaluate(() => {
+    // Look for p tag with class note__heading that's a child of element with class note
+    const noteElement = document.querySelector('.note');
+    if (noteElement) {
+      const headingElement = noteElement.querySelector('p.note__heading');
+      if (headingElement) {
+        return headingElement.textContent.trim();
+      }
+    }
+    
+    // Fallback: try to find note__heading anywhere on the page
+    const headingElement = document.querySelector('p.note__heading');
+    return headingElement ? headingElement.textContent.trim() : null;
+  });
+  
+  console.log(`✅ Project name extracted: ${projectName || 'Not found'}`);
 
   // Expand the thread list container
   console.log('📂 Expanding thread list container...');
@@ -458,6 +497,7 @@ async function extractThreadDataFromPage(page) {
   console.log('✅ Thread data extracted successfully');
   
   const formattedData = {
+    "projectName": projectName || "Unknown Project",
     "threads": Object.keys(threads).map(threadName => ({
       "threadName": threadName,
       "comments": threads[threadName]
@@ -736,6 +776,7 @@ async function getCompletePayload(url, options = {}) {
     const combinedData = {
       success: true,
       url: url,
+      projectName: threadData.projectName || "Unknown Project",
       threads: threadData.threads.map((thread, index) => ({
         ...thread,
         imageIndex: index + 1,
