@@ -1,5 +1,6 @@
 const express = require('express');
 const { captureMarkupScreenshots, diagnoseMarkupPage } = require('./script_integrated');
+const { getCompletePayload } = require('./getpayload');
 require('dotenv').config();
 
 const app = express();
@@ -23,8 +24,79 @@ app.get('/health', (req, res) => {
     status: 'healthy',
     timestamp: new Date().toISOString(),
     uptime: process.uptime(),
-    service: 'n8n-clickup-scraper'
+    service: 'markup-screenshot-payload-extractor'
   });
+});
+
+// Optimized endpoint for complete payload extraction with screenshots (single browser session)
+app.post('/complete-payload', async (req, res) => {
+  try {
+    const {
+      url,
+      options = {}
+    } = req.body;
+
+    // Validate required parameters
+    if (!url) {
+      return res.status(400).json({
+        success: false,
+        error: 'Missing required parameter: url',
+        message: 'Please provide a markup.io URL to extract payload from'
+      });
+    }
+
+    // Validate URL format
+    try {
+      new URL(url);
+    } catch (urlError) {
+      return res.status(400).json({
+        success: false,
+        error: 'Invalid URL format',
+        message: 'Please provide a valid URL (including http:// or https://)'
+      });
+    }
+
+    // Set reasonable defaults
+    const payloadOptions = {
+      screenshotQuality: 90,
+      debugMode: process.env.SCRAPER_DEBUG_MODE === 'true' || false,
+      ...options
+    };
+
+    console.log(`🎬 Starting optimized complete payload extraction for: ${url}`);
+    
+    // Execute optimized payload extraction (single browser session)
+    const result = await getCompletePayload(url, payloadOptions);
+    
+    // Return appropriate response
+    if (result.success) {
+      console.log(`✅ Complete payload extraction completed successfully`);
+      res.status(200).json({
+        success: true,
+        data: result,
+        message: `Successfully extracted ${result.totalThreads || result.threads?.length || 0} threads with ${result.totalScreenshots || 0} screenshots`,
+        timestamp: new Date().toISOString()
+      });
+    } else {
+      console.error(`❌ Complete payload extraction failed: ${result.error}`);
+      res.status(500).json({
+        success: false,
+        error: result.error,
+        data: result,
+        message: 'Complete payload extraction failed',
+        timestamp: new Date().toISOString()
+      });
+    }
+
+  } catch (error) {
+    console.error('Server error:', error);
+    res.status(500).json({
+      success: false,
+      error: error.message,
+      message: 'Internal server error occurred',
+      timestamp: new Date().toISOString()
+    });
+  }
 });
 
 // Main screenshot endpoint - POST for data, GET for simple usage
@@ -211,16 +283,28 @@ app.post('/diagnose', async (req, res) => {
 // API documentation endpoint
 app.get('/', (req, res) => {
   const docs = {
-    service: 'n8n ClickUp Scraper API',
-    version: '1.0.0',
+    service: 'Markup.io Screenshot & Payload Extractor API',
+    version: '2.0.0',
     endpoints: {
       'GET /health': 'Health check endpoint',
       'GET /capture': 'Simple screenshot capture via query parameters',
       'POST /capture': 'Advanced screenshot capture with JSON payload',
+      'POST /complete-payload': '🚀 OPTIMIZED: Extract threads + screenshots in single browser session',
       'POST /diagnose': 'Run diagnostic capture with debug information',
       'GET /': 'This documentation'
     },
     examples: {
+      'Complete Payload (RECOMMENDED)': {
+        endpoint: 'POST /complete-payload',
+        body: {
+          url: 'https://app.markup.io/markup/6039b445-e90e-41c4-ad51-5c46790653c0',
+          options: {
+            screenshotQuality: 90,
+            debugMode: false
+          }
+        },
+        description: 'Extracts thread data and captures screenshots in one optimized request'
+      },
       'Simple GET request': '/capture?url=https://app.markup.io/markup/bb3022bd-01f0-4ed5-8fbb-1c5da2e3bdc7&numberOfImages=2',
       'POST request': {
         url: 'https://app.markup.io/markup/bb3022bd-01f0-4ed5-8fbb-1c5da2e3bdc7',
@@ -235,6 +319,13 @@ app.get('/', (req, res) => {
     environment: {
       port: PORT,
       nodeEnv: process.env.NODE_ENV || 'development'
+    },
+    features: {
+      'Single Browser Session': 'Optimized /complete-payload endpoint uses one browser for both operations',
+      'Dynamic URLs': 'All URLs are dynamic - no hardcoded values',
+      'Dynamic Screenshot Count': 'Screenshot count automatically matches thread count',
+      'Local File Saving': 'Screenshots saved locally for debugging',
+      'Supabase Integration': 'Automatic upload to Supabase storage'
     }
   };
 
@@ -265,15 +356,22 @@ app.use((req, res) => {
 
 // Start server
 app.listen(PORT, () => {
-  console.log(`🚀 n8n ClickUp Scraper API server running on port ${PORT}`);
+  console.log(`🚀 Markup.io Screenshot & Payload Extractor API server running on port ${PORT}`);
   console.log(`📋 Documentation available at: http://localhost:${PORT}/`);
   console.log(`💚 Health check: http://localhost:${PORT}/health`);
-  console.log(`📸 Capture endpoint: http://localhost:${PORT}/capture`);
+  console.log(`📸 Screenshot endpoint: http://localhost:${PORT}/capture`);
+  console.log(`🎯 OPTIMIZED Complete payload: http://localhost:${PORT}/complete-payload`);
   console.log('');
-  console.log('Example usage:');
-  console.log(`curl -X POST http://localhost:${PORT}/capture \\`);
+  console.log('🚀 NEW OPTIMIZED ENDPOINT (RECOMMENDED):');
+  console.log(`curl -X POST http://localhost:${PORT}/complete-payload \\`);
   console.log('  -H "Content-Type: application/json" \\');
-  console.log('  -d \'{"url":"https://app.markup.io/markup/bb3022bd-01f0-4ed5-8fbb-1c5da2e3bdc7","numberOfImages":2}\'');
+  console.log('  -d \'{"url":"https://app.markup.io/markup/6039b445-e90e-41c4-ad51-5c46790653c0"}\'');
+  console.log('');
+  console.log('Features:');
+  console.log('✅ Single browser session (faster)');
+  console.log('✅ Dynamic URLs (no hardcoding)');
+  console.log('✅ Auto screenshot count = thread count');
+  console.log('✅ Local file saving + Supabase upload');
   console.log('');
 });
 

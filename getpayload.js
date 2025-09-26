@@ -22,20 +22,20 @@ async function scrapeMarkupThreads(url = 'https://app.markup.io/markup/6039b445-
     
     // Set viewport and timeouts
     await page.setViewport({ width: 1920, height: 1080 });
-    page.setDefaultTimeout(30000);
-    page.setDefaultNavigationTimeout(30000);
+    page.setDefaultTimeout(60000); // Increased to 60 seconds
+    page.setDefaultNavigationTimeout(60000); // Increased to 60 seconds
     
     // Navigate to the markup page
     console.log(`🌐 Navigating to markup page: ${url}`);
     await page.goto(url, {
       waitUntil: 'networkidle2',
-      timeout: 30000
+      timeout: 60000 // Increased to 60 seconds
     });
     console.log('✅ Page loaded successfully');
 
     // Wait for the thread list to load
     console.log('⏳ Waiting for thread list to load...');
-    await page.waitForSelector('div.thread-list', { timeout: 15000 });
+    await page.waitForSelector('div.thread-list', { timeout: 30000 }); // Increased to 30 seconds
     console.log('✅ Thread list loaded successfully');
 
     // Expand the thread list container to reveal all thread groups
@@ -319,6 +319,260 @@ async function scrapeMarkupThreads(url = 'https://app.markup.io/markup/6039b445-
   }
 }
 
+// Helper function to extract thread data from existing page
+async function extractThreadDataFromPage(page) {
+  console.log('⏳ Waiting for thread list to load...');
+  await page.waitForSelector('div.thread-list', { timeout: 30000 });
+  console.log('✅ Thread list loaded successfully');
+
+  // Expand the thread list container
+  console.log('📂 Expanding thread list container...');
+  await page.evaluate(() => {
+    const threadList = document.querySelector('div.thread-list');
+    if (threadList) {
+      const expandButton = threadList.querySelector('.expand-button, .show-all, .toggle-button, [aria-expanded="false"]');
+      if (expandButton) {
+        expandButton.click();
+        console.log('Clicked thread list expand button');
+      }
+      threadList.style.display = 'block';
+      threadList.style.visibility = 'visible';
+      threadList.style.maxHeight = 'none';
+      threadList.style.overflow = 'visible';
+    }
+  });
+
+  await new Promise(resolve => setTimeout(resolve, 2000));
+  await expandAllThreadGroupsFromPage(page);
+
+  // Extract thread data
+  console.log('🔍 Extracting thread data...');
+  const threads = await page.evaluate(() => {
+    const threadsByName = {};
+
+    // Find thread groups
+    const threadList = document.querySelector('div.thread-list');
+    if (!threadList) {
+      console.error('thread-list container not found!');
+      return threadsByName;
+    }
+    
+    let threadGroups = threadList.querySelectorAll(':scope > div.thread-list-group');
+    let actualThreadCount = threadGroups.length;
+    
+    if (actualThreadCount === 0) {
+      const allThreadGroups = document.querySelectorAll('div.thread-list-group');
+      console.log(`Fallback: Found ${allThreadGroups.length} thread-list-group elements`);
+      threadGroups = allThreadGroups;
+      actualThreadCount = allThreadGroups.length;
+    }
+    
+    threadGroups.forEach((group, groupIndex) => {
+      try {
+        const nameElement = group.querySelector('span.thread-list-item-group-header-label');
+        const counterElement = group.querySelector('span.thread-list-item-group-header-thread-counter');
+        
+        const threadName = nameElement ? nameElement.textContent.trim() : `Thread ${groupIndex + 1}`;
+        const expectedCommentCount = counterElement ? parseInt(counterElement.textContent.trim()) || 0 : 0;
+        
+        console.log(`Processing thread ${groupIndex + 1}/${actualThreadCount}: ${threadName} (expected ${expectedCommentCount} comments)`);
+
+        if (!threadName) {
+          console.warn(`Thread ${groupIndex + 1} has no name, skipping`);
+          return;
+        }
+
+        if (!threadsByName[threadName]) {
+          threadsByName[threadName] = [];
+        }
+
+        const messageElements = group.querySelectorAll('div[data-thread-id]');
+        let threadIndex = 1;
+        
+        Array.from(messageElements).forEach((messageEl, msgIndex) => {
+          try {
+            const threadId = messageEl.getAttribute('data-thread-id') || 
+                           messageEl.getAttribute('data-message-id') || 
+                           `${threadName}-${msgIndex + 1}`;
+            
+            let pinNumber = null;
+            const pinSelectors = ['.thread-label', '.pin-label', '.label-button', '.pin-number'];
+            
+            for (const selector of pinSelectors) {
+              const pinElement = messageEl.querySelector(selector);
+              if (pinElement) {
+                const pinText = pinElement.textContent.trim();
+                const extractedPin = parseInt(pinText.match(/\d+/)?.[0]);
+                if (extractedPin && !isNaN(extractedPin)) {
+                  pinNumber = extractedPin;
+                  break;
+                }
+              }
+            }
+            
+            let messageContent = '';
+            const contentSelectors = ['div.message-text p', '.message-content', '.comment-text', '.thread-content', 'p'];
+            
+            for (const selector of contentSelectors) {
+              const contentElement = messageEl.querySelector(selector);
+              if (contentElement && contentElement.textContent.trim()) {
+                messageContent = contentElement.textContent.trim();
+                break;
+              }
+            }
+            
+            let userName = '';
+            const authorSelectors = ['span.message-author', '.author-name', '.user-name', '.comment-author'];
+            
+            for (const selector of authorSelectors) {
+              const authorElement = messageEl.querySelector(selector);
+              if (authorElement && authorElement.textContent.trim()) {
+                userName = authorElement.textContent.trim() || authorElement.getAttribute('title') || '';
+                if (userName) break;
+              }
+            }
+
+            if (threadId || messageContent || userName) {
+              threadsByName[threadName].push({
+                id: threadId,
+                index: pinNumber || threadIndex,
+                pinNumber: pinNumber || threadIndex,
+                content: messageContent,
+                user: userName
+              });
+              threadIndex++;
+            }
+          } catch (msgError) {
+            console.warn('Error processing message element:', msgError);
+          }
+        });
+        
+      } catch (groupError) {
+        console.warn('Error processing thread group:', groupError);
+      }
+    });
+
+    return threadsByName;
+  });
+
+  console.log('✅ Thread data extracted successfully');
+  
+  const formattedData = {
+    "threads": Object.keys(threads).map(threadName => ({
+      "threadName": threadName,
+      "comments": threads[threadName]
+    }))
+  };
+
+  return formattedData;
+}
+
+// Helper function to expand thread groups from existing page
+async function expandAllThreadGroupsFromPage(page) {
+  try {
+    console.log('Expanding individual thread group containers...');
+    
+    const expandedCount = await page.evaluate(() => {
+      let expandedGroups = 0;
+      
+      const toggleButtons = document.querySelectorAll('div.thread-list-item-group-header-toggle-button-container, .thread-group-toggle, .expand-toggle');
+      
+      toggleButtons.forEach((button, index) => {
+        try {
+          const svg = button.querySelector('svg');
+          const isCollapsed = svg && (svg.classList.contains('collapsed') || !svg.classList.contains('open'));
+          
+          if (isCollapsed || button.getAttribute('aria-expanded') === 'false') {
+            console.log(`Expanding thread group ${index + 1}`);
+            button.click();
+            expandedGroups++;
+          }
+        } catch (err) {
+          console.warn(`Error expanding thread group ${index + 1}:`, err);
+        }
+      });
+      
+      return expandedGroups;
+    });
+
+    await new Promise(resolve => setTimeout(resolve, 2000));
+    console.log(`✅ Expanded ${expandedCount} thread groups`);
+    
+  } catch (error) {
+    console.warn('Could not expand thread groups:', error);
+  }
+}
+
+// Helper function to take screenshots from existing page
+async function takeScreenshotsFromPage(page, url, numberOfImages, options = {}) {
+  try {
+    console.log(`📸 Taking ${numberOfImages} screenshots from existing page...`);
+    
+    // Use the existing MarkupScreenshotter but with the existing page
+    const screenshotter = new MarkupScreenshotter({
+      numberOfImages: numberOfImages,
+      debugMode: options.debugMode || false,
+      screenshotQuality: options.screenshotQuality || 90
+    });
+    
+    // Manually set up the screenshotter with existing page
+    screenshotter.page = page;
+    screenshotter.currentUrl = url;
+    screenshotter.currentTitle = await page.title();
+    screenshotter.sessionId = screenshotter.supabaseService.initializeSession();
+    
+    console.log(`Starting screenshot session: ${screenshotter.sessionId}`);
+    
+    // Wait for images and setup
+    await screenshotter.handleOverlays();
+    await screenshotter.waitForImageContainer();
+    await screenshotter.waitForImagesLoad();
+    await screenshotter.enableFullscreen();
+    
+    // Additional wait for everything to settle
+    await new Promise(resolve => setTimeout(resolve, 2000));
+    
+    // Capture images
+    await screenshotter.captureMultipleImages();
+    
+    const result = {
+      success: true,
+      url: url,
+      title: screenshotter.currentTitle,
+      numberOfImages: screenshotter.screenshots.length,
+      screenshots: screenshotter.screenshots.map(s => s.filename),
+      metadata: screenshotter.getScreenshotMetadata(),
+      supabaseUrls: [],
+      localPaths: screenshotter.screenshots.map(s => s.localPath || '')
+    };
+
+    // Save to Supabase
+    try {
+      const supabaseResult = await screenshotter.supabaseService.saveScrapedData({
+        ...result,
+        screenshotBuffers: screenshotter.screenshots
+      });
+      result.supabaseUrls = supabaseResult.uploadedUrls || [];
+      console.log('Screenshots saved to Supabase successfully');
+    } catch (dbError) {
+      console.error(`Failed to save screenshots to Supabase: ${dbError.message}`);
+    }
+    
+    return result;
+    
+  } catch (error) {
+    console.error(`Screenshot capture failed: ${error.message}`);
+    return {
+      success: false,
+      error: error.message,
+      numberOfImages: 0,
+      screenshots: [],
+      supabaseUrls: [],
+      localPaths: []
+    };
+  }
+}
+
 async function expandAllThreadGroups(page) {
   try {
     // Look for collapsed thread groups and expand them
@@ -412,28 +666,64 @@ async function scrapeWithRetry(maxRetries = 3) {
   }
 }
 
-// Combined function to get payload and screenshots
-async function getCompletePayload(url = 'https://app.markup.io/markup/6039b445-e90e-41c4-ad51-5c46790653c0') {
-  console.log('🎬 Starting complete payload extraction with screenshots...');
+// Combined function to get payload and screenshots in one browser session
+async function getCompletePayload(url, options = {}) {
+  console.log('🎬 Starting optimized payload extraction with screenshots...');
   const startTime = Date.now();
   
+  if (!url) {
+    throw new Error('URL is required for payload extraction');
+  }
+  
+  console.log(`🌐 Target URL: ${url}`);
+  
+  let browser = null;
+  
   try {
-    // Step 1: Extract thread data
-    console.log('📊 Step 1: Extracting thread data...');
-    const threadData = await scrapeMarkupThreads(url);
-    const numberOfImages = threadData.threads.length;
-    
-    console.log(`✅ Found ${numberOfImages} threads, capturing ${numberOfImages} screenshots...`);
-    
-    // Step 2: Capture screenshots
-    console.log('📸 Step 2: Capturing screenshots...');
-    const screenshotter = new MarkupScreenshotter({
-      numberOfImages: numberOfImages,
-      debugMode: false,
-      screenshotQuality: 90
+    // Step 1: Initialize single browser session
+    console.log('🚀 Initializing single browser session...');
+    browser = await puppeteer.launch({
+      headless: true,
+      args: [
+        '--no-sandbox',
+        '--disable-setuid-sandbox',
+        '--disable-dev-shm-usage',
+        '--disable-extensions',
+        '--disable-gpu',
+        '--no-first-run',
+        '--disable-default-apps'
+      ]
     });
     
-    const screenshotResult = await screenshotter.run(url);
+    const page = await browser.newPage();
+    
+    // Set viewport and timeouts
+    await page.setViewport({ width: 1920, height: 1080 });
+    page.setDefaultTimeout(60000);
+    page.setDefaultNavigationTimeout(60000);
+    
+    // Step 2: Navigate to page once
+    console.log(`🌐 Navigating to: ${url}`);
+    await page.goto(url, {
+      waitUntil: 'networkidle2',
+      timeout: 60000
+    });
+    console.log('✅ Page loaded successfully');
+    
+    // Step 3: Extract thread data using existing page
+    console.log('� Step 1: Extracting thread data from loaded page...');
+    const threadData = await extractThreadDataFromPage(page);
+    
+    console.log(`✅ Found ${threadData.threads.length} threads`);
+    
+    // Step 4: Take screenshots using same browser session
+    const numberOfImages = threadData.threads.length;
+    console.log(`📸 Step 2: Taking ${numberOfImages} screenshots using same browser session...`);
+    
+    const screenshotResult = await takeScreenshotsFromPage(page, url, numberOfImages, {
+      screenshotQuality: options.screenshotQuality || 90,
+      debugMode: options.debugMode || false
+    });
     
     if (!screenshotResult.success) {
       throw new Error(`Screenshot capture failed: ${screenshotResult.error}`);
@@ -441,22 +731,25 @@ async function getCompletePayload(url = 'https://app.markup.io/markup/6039b445-e
     
     console.log('✅ Screenshots captured successfully');
     
-    // Step 3: Combine thread data with image paths
-    console.log('🔗 Step 3: Combining thread data with image paths...');
+    // Step 5: Combine results
+    console.log('🔗 Step 3: Combining results...');
     const combinedData = {
       success: true,
-      url: screenshotResult.url || url, // Use the screenshot result URL
+      url: url,
       threads: threadData.threads.map((thread, index) => ({
         ...thread,
         imageIndex: index + 1,
         imagePath: screenshotResult.supabaseUrls[index] || '',
-        imageFilename: screenshotResult.screenshots[index] || `image_${index + 1}.jpg`
+        imageFilename: screenshotResult.screenshots[index] || `image_${index + 1}.jpg`,
+        localImagePath: screenshotResult.localPaths[index] || ''
       })),
+      totalThreads: threadData.threads.length,
+      totalScreenshots: screenshotResult.numberOfImages,
       timestamp: new Date().toISOString()
     };
     
     const duration = ((Date.now() - startTime) / 1000).toFixed(2);
-    console.log(`🎉 Complete payload generated in ${duration}s`);
+    console.log(`🎉 Complete payload generated in ${duration}s with single browser session`);
     
     return combinedData;
     
@@ -465,9 +758,16 @@ async function getCompletePayload(url = 'https://app.markup.io/markup/6039b445-e
     return {
       success: false,
       error: error.message,
+      url: url,
       threads: [],
       timestamp: new Date().toISOString()
     };
+  } finally {
+    if (browser) {
+      console.log('🔐 Closing browser...');
+      await browser.close();
+      console.log('✅ Browser closed successfully');
+    }
   }
 }
 
@@ -476,12 +776,24 @@ async function main() {
   try {
     console.log('🎬 Starting Markup.io complete payload extractor...');
     
-    const data = await getCompletePayload();
+    // Get URL from command line arguments or use environment variable
+    const args = process.argv.slice(2);
+    const url = args[0] || process.env.MARKUP_URL || 'https://app.markup.io/markup/6039b445-e90e-41c4-ad51-5c46790653c0';
+    
+    if (!url) {
+      console.error('❌ No URL provided. Usage: node getpayload.js <url>');
+      process.exit(1);
+    }
+    
+    console.log(`🌐 Processing URL: ${url}`);
+    
+    const data = await getCompletePayload(url);
     
     if (data.success) {
       console.log('🎉 Complete payload extraction successful!');
       console.log(`📊 Total threads: ${data.threads.length}`);
       console.log(`💬 Total messages: ${data.threads.reduce((sum, thread) => sum + thread.comments.length, 0)}`);
+      console.log(`📸 Total screenshots: ${data.totalScreenshots}`);
       
       // Log summary of each thread with image info
       data.threads.forEach((thread, index) => {
@@ -511,5 +823,7 @@ if (require.main === module) {
 module.exports = {
   scrapeMarkupThreads,
   scrapeWithRetry,
-  getCompletePayload
+  getCompletePayload,
+  extractThreadDataFromPage,
+  takeScreenshotsFromPage
 };
