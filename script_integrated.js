@@ -5,15 +5,16 @@ require('dotenv').config();
 class MarkupScreenshotter {
   constructor(options = {}) {
     this.options = {
-      // Default configuration optimized for ClickUp integration
+      // Default configuration
       numberOfImages: 1,
       timeout: parseInt(process.env.SCRAPER_TIMEOUT) || 60000,
       retryAttempts: parseInt(process.env.SCRAPER_RETRY_ATTEMPTS) || 3,
       retryDelay: 2000,
       screenshotQuality: 90, // Reduced from 100 for better file size/quality balance
-      screenshotFormat: 'jpeg', // Use JPEG for better compression and ClickUp compatibility
+      screenshotFormat: 'jpeg', // Use JPEG for better compression
       fullPage: true,
       viewport: { width: 1920, height: 1080 },
+      maxScreenshotHeight: 10000, // Maximum height for long content screenshots
       waitForFullscreen: true,
       debugMode: process.env.SCRAPER_DEBUG_MODE === 'true' || false,
       ...options
@@ -124,12 +125,7 @@ class MarkupScreenshotter {
         timeout: this.options.timeout
       });
       
-      // Verify we're on the correct page
-      const currentUrl = this.page.url();
-      if (currentUrl.includes('login') || currentUrl.includes('auth')) {
-        throw new Error('Page requires authentication');
-      }
-      
+      // Get page title
       this.currentTitle = await this.page.title();
       this.log(`Page loaded: ${this.currentTitle}`);
       
@@ -328,20 +324,107 @@ class MarkupScreenshotter {
   }
 
   async takeScreenshot(filename) {
-    // Use JPEG extension for better ClickUp compatibility
+    // Use JPEG extension for better compatibility
     const jpegFilename = filename.replace(/\.png$/i, '.jpg');
     
     await this.retry(async () => {
       // Wait for any animations to complete
       await this.delay(1000);
       
-      const screenshotOptions = {
-        type: 'jpeg',
-        quality: this.options.screenshotQuality,
-        fullPage: this.options.fullPage
-      };
+      // Get the full scrollable content dimensions
+      const contentSize = await this.page.evaluate(() => {
+        // Find the main content container or image container
+        const containers = [
+          '.image-container',
+          '.main-content',
+          '.markup-content',
+          'main',
+          'body'
+        ];
+        
+        let targetElement = null;
+        for (const selector of containers) {
+          targetElement = document.querySelector(selector);
+          if (targetElement) break;
+        }
+        
+        if (!targetElement) {
+          targetElement = document.body;
+        }
+        
+        return {
+          width: Math.max(
+            targetElement.scrollWidth,
+            targetElement.offsetWidth,
+            document.documentElement.scrollWidth,
+            document.body.scrollWidth
+          ),
+          height: Math.max(
+            targetElement.scrollHeight,
+            targetElement.offsetHeight,
+            document.documentElement.scrollHeight,
+            document.body.scrollHeight
+          ),
+          viewportHeight: window.innerHeight,
+          scrollHeight: document.documentElement.scrollHeight
+        };
+      });
       
-      const screenshotBuffer = await this.page.screenshot(screenshotOptions);
+      this.log(`Content dimensions - Width: ${contentSize.width}px, Height: ${contentSize.height}px, Viewport: ${contentSize.viewportHeight}px`);
+      
+      // If content is much taller than viewport, we need to capture the full scrollable content
+      const isLongContent = contentSize.height > (contentSize.viewportHeight * 1.5);
+      
+      let screenshotBuffer;
+      
+      if (isLongContent) {
+        this.log('Long content detected, capturing full scrollable area...', 'info');
+        
+        // Temporarily adjust viewport to capture full content height
+        const originalViewport = this.page.viewport();
+        
+        // Set a reasonable max height to prevent memory issues
+        const maxHeight = Math.min(contentSize.height, this.options.maxScreenshotHeight);
+        
+        await this.page.setViewport({
+          width: originalViewport.width,
+          height: maxHeight
+        });
+        
+        // Wait for viewport adjustment
+        await this.delay(1000);
+        
+        // Scroll to top to ensure we capture from the beginning
+        await this.page.evaluate(() => {
+          window.scrollTo(0, 0);
+        });
+        
+        await this.delay(500);
+        
+        // Take full page screenshot with adjusted viewport
+        screenshotBuffer = await this.page.screenshot({
+          type: 'jpeg',
+          quality: this.options.screenshotQuality,
+          fullPage: true // This will now capture the full adjusted viewport
+        });
+        
+        // Restore original viewport
+        await this.page.setViewport(originalViewport);
+        
+        this.log(`Full content screenshot captured (${maxHeight}px height)`, 'success');
+        
+      } else {
+        // Normal screenshot for content that fits in viewport
+        this.log('Normal content size, using standard screenshot...', 'info');
+        
+        const screenshotOptions = {
+          type: 'jpeg',
+          quality: this.options.screenshotQuality,
+          fullPage: this.options.fullPage
+        };
+        
+        screenshotBuffer = await this.page.screenshot(screenshotOptions);
+      }
       
       // Verify screenshot was captured
       if (!screenshotBuffer || screenshotBuffer.length < 1000) { // Less than 1KB is probably an error
