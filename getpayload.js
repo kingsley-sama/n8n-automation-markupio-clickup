@@ -1,5 +1,6 @@
 const puppeteer = require('puppeteer');
 const { MarkupScreenshotter } = require('./script_integrated.js');
+const SupabaseService = require('./supabase-service.js');
 
 async function scrapeMarkupThreads(url = 'https://app.markup.io/markup/6039b445-e90e-41c4-ad51-5c46790653c0') {
   console.log('🚀 Initializing browser...');
@@ -583,7 +584,8 @@ async function takeScreenshotsFromPage(page, url, numberOfImages, options = {}) 
       screenshots: screenshotter.screenshots.map(s => s.filename),
       metadata: screenshotter.getScreenshotMetadata(),
       supabaseUrls: [],
-      localPaths: screenshotter.screenshots.map(s => s.localPath || '')
+      localPaths: screenshotter.screenshots.map(s => s.localPath || ''),
+      screenshotBuffers: screenshotter.screenshots // Include the actual screenshot buffers
     };
 
     // Save to Supabase
@@ -771,23 +773,59 @@ async function getCompletePayload(url, options = {}) {
     
     console.log('✅ Screenshots captured successfully');
     
-    // Step 5: Combine results
-    console.log('🔗 Step 3: Combining results...');
+    // Step 5: Combine results and save to Supabase with URL checking
+    console.log('🔗 Step 3: Combining results and saving to Supabase...');
+    
+    // Initialize Supabase service for complete payload saving
+    const supabaseService = new SupabaseService();
+    const sessionId = supabaseService.initializeSession();
+    
+    // Add screenshot buffers to threads for Supabase storage
+    const threadsWithScreenshots = threadData.threads.map((thread, index) => ({
+      ...thread,
+      imageIndex: index + 1,
+      imagePath: screenshotResult.supabaseUrls[index] || '',
+      imageFilename: screenshotResult.screenshots[index] || `thread_${index + 1}.jpg`,
+      localImagePath: screenshotResult.localPaths[index] || '',
+      // Add screenshot buffer from the screenshotter for Supabase upload
+      screenshotBuffer: screenshotResult.screenshotBuffers && screenshotResult.screenshotBuffers[index] 
+        ? screenshotResult.screenshotBuffers[index].buffer 
+        : null
+    }));
+    
     const combinedData = {
       success: true,
       url: url,
       projectName: threadData.projectName || "Unknown Project",
-      threads: threadData.threads.map((thread, index) => ({
-        ...thread,
-        imageIndex: index + 1,
-        imagePath: screenshotResult.supabaseUrls[index] || '',
-        imageFilename: screenshotResult.screenshots[index] || `image_${index + 1}.jpg`,
-        localImagePath: screenshotResult.localPaths[index] || ''
-      })),
+      threads: threadsWithScreenshots,
       totalThreads: threadData.threads.length,
       totalScreenshots: screenshotResult.numberOfImages,
-      timestamp: new Date().toISOString()
+      timestamp: new Date().toISOString(),
+      sessionId: sessionId
     };
+
+    // Save complete payload to Supabase with URL checking and image replacement
+    try {
+      console.log('💾 Step 4: Saving complete payload to Supabase with URL checking...');
+      const supabaseResult = await supabaseService.saveCompletePayload(combinedData);
+      
+      // Update image paths with the uploaded URLs
+      combinedData.threads = combinedData.threads.map((thread, index) => ({
+        ...thread,
+        imagePath: supabaseResult.uploadedUrls[index] || thread.imagePath,
+        screenshotBuffer: undefined // Remove buffer from final response
+      }));
+      
+      combinedData.supabaseOperation = supabaseResult.operation; // 'created' or 'updated'
+      combinedData.oldImagesDeleted = supabaseResult.oldImagesDeleted;
+      combinedData.supabaseRecordId = supabaseResult.id;
+      
+      console.log(`✅ Complete payload ${supabaseResult.operation} in Supabase (${supabaseResult.oldImagesDeleted} old images deleted)`);
+    } catch (dbError) {
+      console.error(`Failed to save complete payload to Supabase: ${dbError.message}`);
+      // Continue without failing the entire operation
+      combinedData.supabaseError = dbError.message;
+    }
     
     const duration = ((Date.now() - startTime) / 1000).toFixed(2);
     console.log(`🎉 Complete payload generated in ${duration}s with single browser session`);

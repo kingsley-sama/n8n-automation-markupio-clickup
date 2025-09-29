@@ -71,10 +71,21 @@ app.post('/complete-payload', async (req, res) => {
     // Return appropriate response
     if (result.success) {
       console.log(`✅ Complete payload extraction completed successfully`);
+      
+      // Enhanced message with URL checking info
+      let message = `Successfully extracted ${result.totalThreads || result.threads?.length || 0} threads with ${result.totalScreenshots || 0} screenshots`;
+      if (result.supabaseOperation === 'updated') {
+        message += ` (Updated existing record, replaced ${result.oldImagesDeleted || 0} old images)`;
+      } else if (result.supabaseOperation === 'created') {
+        message += ` (Created new record)`;
+      }
+      
       res.status(200).json({
         success: true,
         data: result,
-        message: `Successfully extracted ${result.totalThreads || result.threads?.length || 0} threads with ${result.totalScreenshots || 0} screenshots`,
+        message: message,
+        supabaseOperation: result.supabaseOperation || 'unknown',
+        oldImagesDeleted: result.oldImagesDeleted || 0,
         timestamp: new Date().toISOString()
       });
     } else {
@@ -157,10 +168,21 @@ app.post('/capture', async (req, res) => {
     // Return appropriate response
     if (result.success) {
       console.log(`✅ Screenshot capture completed successfully`);
+      
+      // Enhanced message with URL checking info
+      let message = `Successfully captured ${result.numberOfImages} screenshots`;
+      if (result.supabaseOperation === 'updated') {
+        message += ` (Updated existing record, replaced ${result.oldImagesDeleted || 0} old images)`;
+      } else if (result.supabaseOperation === 'created') {
+        message += ` (Created new record)`;
+      }
+      
       res.status(200).json({
         success: true,
         data: result,
-        message: `Successfully captured ${result.numberOfImages} screenshots`,
+        message: message,
+        supabaseOperation: result.supabaseOperation || 'unknown',
+        oldImagesDeleted: result.oldImagesDeleted || 0,
         timestamp: new Date().toISOString()
       });
     } else {

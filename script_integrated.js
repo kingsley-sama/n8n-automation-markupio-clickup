@@ -624,7 +624,7 @@ class MarkupScreenshotter {
         supabaseUrls: [] // Will be populated after Supabase upload
       };
 
-      // Save successful scraping data to Supabase and get URLs
+      // Save successful scraping data to Supabase and get URLs (with URL checking and image replacement)
       try {
         const supabaseResult = await this.supabaseService.saveScrapedData({
           ...result,
@@ -632,7 +632,14 @@ class MarkupScreenshotter {
         });
         result.supabaseUrls = supabaseResult.uploadedUrls || [];
         result.sessionId = this.sessionId;
-        this.log('Scraping data saved to Supabase successfully', 'success');
+        result.supabaseOperation = supabaseResult.operation; // 'created' or 'updated'
+        result.oldImagesDeleted = supabaseResult.oldImagesDeleted || 0;
+        
+        if (supabaseResult.operation === 'updated') {
+          this.log(`Scraping data updated in Supabase (replaced ${supabaseResult.oldImagesDeleted} old images)`, 'success');
+        } else {
+          this.log('Scraping data saved to Supabase successfully', 'success');
+        }
       } catch (dbError) {
         this.log(`Failed to save to Supabase: ${dbError.message}`, 'error');
         // Don't fail the entire operation if database save fails
@@ -719,7 +726,17 @@ async function main() {
     console.log(`\n🎉 SUCCESS: ${result.message}`);
     console.log(`� Screenshots captured: ${result.screenshots.join(', ')}`);
     console.log(`⏱️  Duration: ${result.duration}s`);
-    console.log(`💾 Data saved to Supabase with session ID: ${result.sessionId || 'Unknown'}`);
+    
+    // Show URL checking results
+    if (result.supabaseOperation) {
+      const operation = result.supabaseOperation === 'updated' ? 'UPDATED' : 'CREATED';
+      console.log(`💾 Data ${operation} in Supabase with session ID: ${result.sessionId || 'Unknown'}`);
+      if (result.supabaseOperation === 'updated' && result.oldImagesDeleted > 0) {
+        console.log(`🗑️  Replaced ${result.oldImagesDeleted} old images`);
+      }
+    } else {
+      console.log(`💾 Data saved to Supabase with session ID: ${result.sessionId || 'Unknown'}`);
+    }
     
     // Display metadata useful for ClickUp integration
     result.metadata.forEach((meta, index) => {

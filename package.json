@@ -1,11 +1,16 @@
 {
-  "name": "project-review-automation",
+  "name": "markup-clickup-automation",
   "type": "commonjs",
-  "version": "1.0.0",
-  "description": "Olawale a developer: He works on project flow NOra: egypt- works on superbase . A lot of delay on superbase and that is delaying olawale Task for the week: Think of the process we implement. Go through task of last and plan new week and have daily updates and talk about blockers --- we need 2 weekly calls to set goals and later have friday update and overview of what we have worked on  - Task . Think of a system for better process it might be a good idea to have all the task we are working on in clickup. This will give us a good way to track everything.  - There is a workflow we might have to work on  -  - We can get feed Back from markup and create clickup task for these feedbacks because there tags to help fix the parts that needs adjustments it make it easier to pinpoint the areas that needs fixes",
-  "main": "get_screenshots.js",
+  "version": "2.0.0",
+  "description": "Markup.io screenshot capture and thread extraction automation with Supabase integration. Features URL-based deduplication, automatic image replacement, and ClickUp integration for project feedback workflows.",
+  "main": "server.js",
   "scripts": {
-    "test": "echo \"Error: no test specified\" && exit 1"
+    "start": "node server.js",
+    "dev": "node server.js",
+    "capture": "node script_integrated.js",
+    "payload": "node getpayload.js",
+    "test-url-checking": "node test_url_checking.js",
+    "test": "node test_url_checking.js"
   },
   "keywords": [],
   "author": "",
