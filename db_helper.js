@@ -1,5 +1,5 @@
 const puppeteer = require('puppeteer');
-const SupabaseService = require('./supabase-service');
+const SupabaseService = require('./supabase-service.js');
 require('dotenv').config();
 
 const SELECTORS = {

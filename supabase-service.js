@@ -6,7 +6,7 @@ class SupabaseService {
   constructor() {
     this.supabaseUrl = process.env.SUPABASE_URL;
     this.supabaseKey = process.env.SUPABASE_SERVICE_KEY || process.env.SUPABASE_ANON_KEY;
-    this.bucketName = process.env.SUPABASE_BUCKET || 'screenshots'; // bucket name (default = "screenshots")
+    this.bucketName = process.env.SUPABASE_BUCKET || 'screenshots';
 
     if (!this.supabaseUrl || !this.supabaseKey) {
       throw new Error('Supabase URL and key are required. Please check your environment variables.');
@@ -30,7 +30,6 @@ class SupabaseService {
   }
 
   async log(level, message, errorDetails = null, context = null) {
-    // Only log errors to database for manual retriggering
     if (level === 'error') {
       try {
         const errorLogEntry = {
@@ -39,7 +38,7 @@ class SupabaseService {
           title: context?.title || null,
           error_message: message,
           number_of_images: context?.numberOfImages || null,
-          error_details: { error: message }, // Minimal error details
+          error_details: { error: message },
           options: context?.options || null,
           failed_at: new Date().toISOString(),
           status: 'failed'
@@ -51,14 +50,8 @@ class SupabaseService {
         console.error('Error saving error log to database:', error);
       }
     }
-    // All other log levels are just console output
   }
 
-  /**
-   * Check if a URL already exists in the database
-   * @param {string} url - The URL to check for
-   * @returns {Object|null} - The existing record or null if not found
-   */
   async findExistingRecord(url) {
     try {
       const { data, error } = await this.supabase
@@ -69,7 +62,7 @@ class SupabaseService {
         .limit(1)
         .single();
 
-      if (error && error.code !== 'PGRST116') { // PGRST116 = no rows found
+      if (error && error.code !== 'PGRST116') {
         throw error;
       }
 
@@ -80,10 +73,6 @@ class SupabaseService {
     }
   }
 
-  /**
-   * Delete images from Supabase storage
-   * @param {Array} imagePaths - Array of storage paths to delete
-   */
   async deleteImagesFromStorage(imagePaths) {
     if (!imagePaths || imagePaths.length === 0) {
       return { success: true, deleted: [] };
@@ -91,14 +80,13 @@ class SupabaseService {
 
     try {
       const pathsToDelete = imagePaths.map(path => {
-        // Extract the file path from the public URL if needed
         if (path.includes('/storage/v1/object/public/')) {
           const parts = path.split('/storage/v1/object/public/');
           if (parts.length > 1) {
             const bucketAndPath = parts[1];
             const pathParts = bucketAndPath.split('/');
             if (pathParts.length > 1) {
-              return pathParts.slice(1).join('/'); // Remove bucket name, keep file path
+              return pathParts.slice(1).join('/');
             }
           }
         }
@@ -126,12 +114,6 @@ class SupabaseService {
     }
   }
 
-  /**
-   * Upload a single screenshot to Supabase Storage
-   * @param {Buffer} fileBuffer - The screenshot buffer
-   * @param {string} filename - The filename for the screenshot
-   * @param {string} contentType - The content type (default: 'image/jpeg')
-   */
   async uploadScreenshot(fileBuffer, filename, contentType = 'image/jpeg') {
     try {
       const fileExt = path.extname(filename) || '.jpg';
@@ -149,7 +131,6 @@ class SupabaseService {
         throw error;
       }
 
-      // Return a public URL (if bucket is public) or the storage path
       const { data: publicUrlData } = this.supabase.storage
         .from(this.bucketName)
         .getPublicUrl(fileName);
@@ -161,12 +142,8 @@ class SupabaseService {
     }
   }
 
-  /**
-   * Save successful scraping (creates new record or updates existing one)
-   */
   async saveScrapedData(data) {
     try {
-      // Check if URL already exists
       const existingRecord = await this.findExistingRecord(data.url);
       let oldImagePaths = [];
       
@@ -175,10 +152,8 @@ class SupabaseService {
         oldImagePaths = existingRecord.screenshots_paths || [];
       }
 
-      // Upload new screenshots to Supabase Storage
       const uploadedPaths = [];
       
-      // Handle new screenshot format with buffers
       if (data.screenshotBuffers && Array.isArray(data.screenshotBuffers)) {
         for (const screenshot of data.screenshotBuffers) {
           const uploadedPath = await this.uploadScreenshot(
@@ -208,7 +183,6 @@ class SupabaseService {
       let operation;
 
       if (existingRecord) {
-        // Update existing record
         const { data: updatedData, error } = await this.supabase
           .from('scraped_data')
           .update(scrapingRecord)
@@ -224,7 +198,6 @@ class SupabaseService {
         resultData = updatedData;
         operation = 'updated';
 
-        // Delete old images from storage after successful update
         if (oldImagePaths.length > 0) {
           console.log(`Deleting ${oldImagePaths.length} old images from storage...`);
           const deleteResult = await this.deleteImagesFromStorage(oldImagePaths);
@@ -235,7 +208,6 @@ class SupabaseService {
           }
         }
       } else {
-        // Create new record
         const { data: insertedData, error } = await this.supabase
           .from('scraped_data')
           .insert([scrapingRecord])
@@ -253,7 +225,6 @@ class SupabaseService {
 
       await this.log('success', `Successfully ${operation} scraped data with ${uploadedPaths.length} screenshots`);
       
-      // Return the result data with uploaded URLs and operation info
       return {
         ...resultData,
         uploadedUrls: uploadedPaths,
@@ -267,21 +238,274 @@ class SupabaseService {
   }
 
   /**
-   * Save failed scraping - minimal data for manual retriggering
+   * NEW: Save complete payload using normalized structure (projects, threads, comments)
+   * This handles URL checking, image management, and uses the PostgreSQL function
    */
+  async saveCompletePayloadNormalized(payloadData) {
+    try {
+      console.log('🔍 Checking for existing project...');
+      const existingRecord = await this.findExistingRecord(payloadData.url);
+      let existingProject = null;
+      let oldImagePaths = [];
+      
+      if (existingRecord) {
+        console.log(`Found existing scraped_data record for URL: ${payloadData.url}`);
+        oldImagePaths = existingRecord.screenshots_paths || [];
+        
+        // Check if there's an existing project linked to this scraped_data
+        const { data: projectData, error: projectError } = await this.supabase
+          .from('markup_projects')
+          .select('*')
+          .eq('scraped_data_id', existingRecord.id)
+          .limit(1)
+          .single();
+        
+        if (!projectError && projectData) {
+          existingProject = projectData;
+          console.log(`Found existing project: ${existingProject.id}`);
+        }
+      }
+
+      // Upload screenshots first
+      console.log('📸 Uploading screenshots...');
+      const uploadedPaths = [];
+      const threadsWithUrls = [];
+      
+      if (payloadData.threads && Array.isArray(payloadData.threads)) {
+        for (let i = 0; i < payloadData.threads.length; i++) {
+          const thread = payloadData.threads[i];
+          let uploadedUrl = '';
+          
+          if (thread.screenshotBuffer) {
+            const filename = thread.imageFilename || `thread_${i + 1}.jpg`;
+            uploadedUrl = await this.uploadScreenshot(
+              thread.screenshotBuffer,
+              filename,
+              'image/jpeg'
+            );
+            uploadedPaths.push(uploadedUrl);
+          }
+          
+          threadsWithUrls.push({
+            ...thread,
+            imagePath: uploadedUrl,
+            localImagePath: uploadedUrl
+          });
+        }
+      }
+
+      console.log(`✅ Uploaded ${uploadedPaths.length} screenshots`);
+
+      // Save or update scraped_data record first
+      let scrapedDataId;
+      let operation;
+
+      const scrapedDataRecord = {
+        session_id: this.currentSessionId,
+        url: payloadData.url,
+        title: payloadData.projectName || 'Unknown Project',
+        number_of_images: uploadedPaths.length,
+        screenshot_metadata: uploadedPaths.map((url, idx) => ({
+          filename: threadsWithUrls[idx].imageFilename,
+          url: url
+        })),
+        screenshots_paths: uploadedPaths,
+        success: payloadData.success !== false,
+        options: {
+          type: 'complete_payload_normalized',
+          totalThreads: payloadData.threads?.length || 0
+        },
+        scraping_timestamp: new Date().toISOString(),
+        updated_at: new Date().toISOString()
+      };
+
+      if (existingRecord) {
+        const { data: updatedData, error } = await this.supabase
+          .from('scraped_data')
+          .update(scrapedDataRecord)
+          .eq('id', existingRecord.id)
+          .select()
+          .single();
+
+        if (error) throw new Error(`Failed to update scraped_data: ${error.message}`);
+        
+        scrapedDataId = updatedData.id;
+        operation = 'updated';
+        
+        // Delete old images after successful update
+        if (oldImagePaths.length > 0) {
+          console.log(`🗑️ Deleting ${oldImagePaths.length} old images...`);
+          await this.deleteImagesFromStorage(oldImagePaths);
+        }
+      } else {
+        const { data: insertedData, error } = await this.supabase
+          .from('scraped_data')
+          .insert([scrapedDataRecord])
+          .select()
+          .single();
+
+        if (error) throw new Error(`Failed to insert scraped_data: ${error.message}`);
+        
+        scrapedDataId = insertedData.id;
+        operation = 'created';
+      }
+
+      console.log(`✅ Scraped data ${operation}: ${scrapedDataId}`);
+
+      // If updating, delete existing project/threads/comments first
+      if (existingProject) {
+        console.log('🗑️ Deleting existing project and related data...');
+        const { error: deleteError } = await this.supabase
+          .from('markup_projects')
+          .delete()
+          .eq('id', existingProject.id);
+        
+        if (deleteError) {
+          console.warn('Warning: Failed to delete existing project:', deleteError);
+        } else {
+          console.log('✅ Existing project deleted (cascading to threads and comments)');
+        }
+      }
+
+      // Prepare payload for PostgreSQL function
+      const functionPayload = {
+        data: {
+          projectName: payloadData.projectName || 'Unknown Project',
+          url: payloadData.url,
+          totalThreads: threadsWithUrls.length,
+          totalScreenshots: uploadedPaths.length,
+          timestamp: new Date().toISOString(),
+          threads: threadsWithUrls.map((thread, threadIdx) => ({
+            threadName: thread.threadName,
+            imageIndex: threadIdx + 1,
+            imagePath: thread.imagePath,
+            imageFilename: thread.imageFilename || `thread_${threadIdx + 1}.jpg`,
+            localImagePath: thread.localImagePath,
+            comments: (thread.comments || []).map(comment => ({
+              id: comment.id || this.generateUUID(),
+              index: comment.index || comment.pinNumber || 0,
+              pinNumber: comment.pinNumber || comment.index || 0,
+              content: comment.content || '',
+              user: comment.user || 'Unknown'
+            }))
+          }))
+        }
+      };
+
+      // Call PostgreSQL function to insert normalized data
+      console.log('💾 Saving to normalized tables using PostgreSQL function...');
+      const { data: projectId, error: functionError } = await this.supabase
+        .rpc('insert_markup_payload', {
+          p_scraped_data_id: scrapedDataId,
+          p_payload: functionPayload
+        });
+
+      if (functionError) {
+        throw new Error(`Failed to insert normalized data: ${functionError.message}`);
+      }
+
+      console.log(`✅ Project saved with ID: ${projectId}`);
+
+      return {
+        success: true,
+        operation: operation,
+        scrapedDataId: scrapedDataId,
+        projectId: projectId,
+        uploadedUrls: uploadedPaths,
+        oldImagesDeleted: oldImagePaths.length,
+        totalThreads: threadsWithUrls.length,
+        totalComments: threadsWithUrls.reduce((sum, t) => sum + (t.comments?.length || 0), 0)
+      };
+
+    } catch (error) {
+      console.error('Error in saveCompletePayloadNormalized:', error.message);
+      throw error;
+    }
+  }
+
+  /**
+   * Fetch complete project data from normalized tables
+   */
+  async getProjectFromDB(url) {
+    try {
+      // Find scraped_data by URL
+      const { data: scrapedData, error: scrapedError } = await this.supabase
+        .from('scraped_data')
+        .select('id, url, title, scraping_timestamp, screenshots_paths')
+        .eq('url', url)
+        .order('scraping_timestamp', { ascending: false })
+        .limit(1)
+        .single();
+
+      if (scrapedError || !scrapedData) {
+        return null;
+      }
+
+      // Get project with threads and comments
+      const { data: project, error: projectError } = await this.supabase
+        .from('markup_projects')
+        .select(`
+          *,
+          markup_threads (
+            *,
+            markup_comments (*)
+          )
+        `)
+        .eq('scraped_data_id', scrapedData.id)
+        .order('created_at', { ascending: false })
+        .limit(1)
+        .single();
+
+      if (projectError || !project) {
+        return null;
+      }
+
+      // Format response
+      return {
+        success: true,
+        url: scrapedData.url,
+        projectName: project.project_name,
+        totalThreads: project.total_threads,
+        totalScreenshots: project.total_screenshots,
+        timestamp: project.extraction_timestamp,
+        threads: (project.markup_threads || []).map(thread => ({
+          threadName: thread.thread_name,
+          imageIndex: thread.image_index,
+          imagePath: thread.image_path,
+          imageFilename: thread.image_filename,
+          localImagePath: thread.local_image_path,
+          comments: (thread.markup_comments || []).map(comment => ({
+            id: comment.id,
+            index: comment.comment_index,
+            pinNumber: comment.pin_number,
+            content: comment.content,
+            user: comment.user_name
+          }))
+        }))
+      };
+
+    } catch (error) {
+      console.error('Error fetching project from DB:', error.message);
+      return null;
+    }
+  }
+
+  // Keep legacy methods for backward compatibility
+  async saveCompletePayload(payloadData) {
+    // Redirect to normalized version
+    return await this.saveCompletePayloadNormalized(payloadData);
+  }
+
   async saveFailedScraping(data) {
     try {
-      // Save only essential info to error logs table for manual retriggering
       const errorLogEntry = {
         session_id: this.currentSessionId,
         url: data.url,
         title: data.title,
         error_message: data.error,
         number_of_images: data.options?.numberOfImages || 0,
-        error_details: {
-          error: data.error
-        },
-        options: data.options, // Keep options for exact retry
+        error_details: { error: data.error },
+        options: data.options,
         failed_at: new Date().toISOString(),
         status: 'failed'
       };
@@ -316,77 +540,6 @@ class SupabaseService {
     }
   }
 
-  async getFailedScrapings(limit = 50, status = 'failed') {
-    try {
-      const { data, error } = await this.supabase
-        .from('scraping_error_logs')
-        .select('*')
-        .eq('status', status)
-        .order('failed_at', { ascending: false })
-        .limit(limit);
-
-      if (error) throw new Error(`Failed to fetch failed scrapings: ${error.message}`);
-      return data;
-    } catch (error) {
-      console.error('Error fetching failed scrapings:', error.message);
-      throw error;
-    }
-  }
-
-  async markErrorForRetry(errorId) {
-    try {
-      const { data, error } = await this.supabase
-        .from('scraping_error_logs')
-        .update({ 
-          status: 'retrying',
-          retry_count: this.supabase.raw('retry_count + 1'),
-          last_retry_at: new Date().toISOString()
-        })
-        .eq('id', errorId)
-        .select()
-        .single();
-
-      if (error) throw new Error(`Failed to mark error for retry: ${error.message}`);
-      return data;
-    } catch (error) {
-      console.error('Error marking for retry:', error.message);
-      throw error;
-    }
-  }
-
-  async markErrorAsResolved(errorId) {
-    try {
-      const { data, error } = await this.supabase
-        .from('scraping_error_logs')
-        .update({ status: 'resolved' })
-        .eq('id', errorId)
-        .select()
-        .single();
-
-      if (error) throw new Error(`Failed to mark error as resolved: ${error.message}`);
-      return data;
-    } catch (error) {
-      console.error('Error marking as resolved:', error.message);
-      throw error;
-    }
-  }
-
-  async getSessionLogs(sessionId) {
-    try {
-      const { data, error } = await this.supabase
-        .from('scraping_error_logs')
-        .select('*')
-        .eq('session_id', sessionId)
-        .order('failed_at', { ascending: true });
-
-      if (error) throw new Error(`Failed to fetch session logs: ${error.message}`);
-      return data;
-    } catch (error) {
-      console.error('Error fetching session logs:', error);
-      throw error;
-    }
-  }
-
   async healthCheck() {
     try {
       const { data, error } = await this.supabase.from('scraped_data').select('id').limit(1);
@@ -394,156 +547,6 @@ class SupabaseService {
       return true;
     } catch {
       return false;
-    }
-  }
-
-  async cleanupOldLogs(daysOld = 30) {
-    try {
-      const cutoffDate = new Date();
-      cutoffDate.setDate(cutoffDate.getDate() - daysOld);
-
-      // Clean up resolved error logs older than specified days
-      const { error } = await this.supabase
-        .from('scraping_error_logs')
-        .delete()
-        .eq('status', 'resolved')
-        .lt('failed_at', cutoffDate.toISOString());
-
-      if (error) {
-        console.error('Failed to cleanup old error logs:', error);
-        return false;
-      }
-
-      console.log(`Successfully cleaned up resolved error logs older than ${daysOld} days`);
-      return true;
-    } catch (error) {
-      console.error('Error during log cleanup:', error.message);
-      return false;
-    }
-  }
-
-  /**
-   * Save complete payload data (for thread + screenshot combinations)
-   * This method handles URL checking and updates for the combined payload system
-   */
-  async saveCompletePayload(payloadData) {
-    try {
-      // Check if URL already exists
-      const existingRecord = await this.findExistingRecord(payloadData.url);
-      let oldImagePaths = [];
-      
-      if (existingRecord) {
-        console.log(`Found existing record for URL: ${payloadData.url}, updating complete payload`);
-        oldImagePaths = existingRecord.screenshots_paths || [];
-      }
-
-      // Extract screenshot buffers and metadata from threads
-      const screenshotBuffers = [];
-      const screenshotMetadata = [];
-      
-      if (payloadData.threads && Array.isArray(payloadData.threads)) {
-        payloadData.threads.forEach((thread, index) => {
-          if (thread.screenshotBuffer) {
-            screenshotBuffers.push({
-              buffer: thread.screenshotBuffer,
-              filename: thread.imageFilename || `thread_${index + 1}.jpg`
-            });
-          }
-        });
-      }
-
-      // Upload new screenshots
-      const uploadedPaths = [];
-      for (const screenshot of screenshotBuffers) {
-        const uploadedPath = await this.uploadScreenshot(
-          screenshot.buffer,
-          screenshot.filename,
-          'image/jpeg'
-        );
-        uploadedPaths.push(uploadedPath);
-        screenshotMetadata.push({
-          filename: screenshot.filename,
-          format: 'jpeg',
-          uploadedUrl: uploadedPath
-        });
-      }
-
-      // Prepare the complete payload record
-      const completePayloadRecord = {
-        session_id: this.currentSessionId,
-        url: payloadData.url,
-        title: payloadData.projectName || 'Unknown Project',
-        number_of_images: payloadData.totalScreenshots || uploadedPaths.length,
-        screenshot_metadata: screenshotMetadata,
-        screenshots_paths: uploadedPaths,
-        success: payloadData.success,
-        options: {
-          type: 'complete_payload',
-          totalThreads: payloadData.totalThreads,
-          payload: payloadData
-        },
-        scraping_timestamp: new Date().toISOString(),
-        updated_at: new Date().toISOString()
-      };
-
-      let resultData;
-      let operation;
-
-      if (existingRecord) {
-        // Update existing record
-        const { data: updatedData, error } = await this.supabase
-          .from('scraped_data')
-          .update(completePayloadRecord)
-          .eq('id', existingRecord.id)
-          .select()
-          .single();
-
-        if (error) {
-          await this.log('error', 'Failed to update existing complete payload', error);
-          throw new Error(`Database update failed: ${error.message}`);
-        }
-
-        resultData = updatedData;
-        operation = 'updated';
-
-        // Delete old images from storage after successful update
-        if (oldImagePaths.length > 0) {
-          console.log(`Deleting ${oldImagePaths.length} old images from storage...`);
-          const deleteResult = await this.deleteImagesFromStorage(oldImagePaths);
-          if (deleteResult.success) {
-            console.log(`Successfully deleted ${deleteResult.deleted.length} old images`);
-          } else {
-            console.warn(`Failed to delete some old images: ${deleteResult.error}`);
-          }
-        }
-      } else {
-        // Create new record
-        const { data: insertedData, error } = await this.supabase
-          .from('scraped_data')
-          .insert([completePayloadRecord])
-          .select()
-          .single();
-
-        if (error) {
-          await this.log('error', 'Failed to save complete payload to database', error);
-          throw new Error(`Database save failed: ${error.message}`);
-        }
-
-        resultData = insertedData;
-        operation = 'created';
-      }
-
-      console.log(`Successfully ${operation} complete payload with ${uploadedPaths.length} screenshots`);
-      
-      return {
-        ...resultData,
-        uploadedUrls: uploadedPaths,
-        operation: operation,
-        oldImagesDeleted: oldImagePaths.length
-      };
-    } catch (error) {
-      console.error('Error in saveCompletePayload method:', error.message);
-      throw error;
     }
   }
 }

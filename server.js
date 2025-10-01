@@ -1,16 +1,23 @@
+
 const express = require('express');
-const { captureMarkupScreenshots, diagnoseMarkupPage } = require('./script_integrated');
+const { captureMarkupScreenshots, diagnoseMarkupPage } = require('./db_helper');
 const { getCompletePayload } = require('./getpayload');
+const { 
+  getProjectDataFromDB, 
+  getAllProjects, 
+  getProjectById,
+  searchThreadsByContent,
+  getStatistics,
+  getProjectByPartialName
+} = require('./db_response_helper.js');
 require('dotenv').config();
 
 const app = express();
 const PORT = process.env.PORT || 3000;
 
-// Middleware
 app.use(express.json({ limit: '10mb' }));
 app.use(express.urlencoded({ extended: true }));
 
-// Add CORS if needed
 app.use((req, res, next) => {
   res.header('Access-Control-Allow-Origin', '*');
   res.header('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE');
@@ -18,7 +25,6 @@ app.use((req, res, next) => {
   next();
 });
 
-// Health check endpoint
 app.get('/health', (req, res) => {
   res.json({
     status: 'healthy',
@@ -28,128 +34,283 @@ app.get('/health', (req, res) => {
   });
 });
 
-// Optimized endpoint for complete payload extraction with screenshots (single browser session)
+// Main endpoint: Extract and save to normalized structure
 app.post('/complete-payload', async (req, res) => {
   try {
-    const {
-      url,
-      options = {}
-    } = req.body;
-
-    // Validate required parameters
+    const { url, options = {} } = req.body;
+    
     if (!url) {
       return res.status(400).json({
         success: false,
-        error: 'Missing required parameter: url',
-        message: 'Please provide a markup.io URL to extract payload from'
+        error: 'Missing required parameter: url'
       });
     }
-
-    // Validate URL format
-    try {
-      new URL(url);
-    } catch (urlError) {
+    
+    try { new URL(url); } catch (urlError) {
       return res.status(400).json({
         success: false,
-        error: 'Invalid URL format',
-        message: 'Please provide a valid URL (including http:// or https://)'
+        error: 'Invalid URL format'
       });
     }
-
-    // Set reasonable defaults
+    
     const payloadOptions = {
       screenshotQuality: 90,
       debugMode: process.env.SCRAPER_DEBUG_MODE === 'true' || false,
       ...options
     };
-
-    console.log(`🎬 Starting optimized complete payload extraction for: ${url}`);
     
-    // Execute optimized payload extraction (single browser session)
+    console.log(`Starting payload extraction for: ${url}`);
+    
+    // Extract and save to normalized tables
     const result = await getCompletePayload(url, payloadOptions);
     
-    // Return appropriate response
-    if (result.success) {
-      console.log(`✅ Complete payload extraction completed successfully`);
-      
-      // Enhanced message with URL checking info
-      let message = `Successfully extracted ${result.totalThreads || result.threads?.length || 0} threads with ${result.totalScreenshots || 0} screenshots`;
-      if (result.supabaseOperation === 'updated') {
-        message += ` (Updated existing record, replaced ${result.oldImagesDeleted || 0} old images)`;
-      } else if (result.supabaseOperation === 'created') {
-        message += ` (Created new record)`;
-      }
-      
-      res.status(200).json({
-        success: true,
-        data: result,
-        message: message,
-        supabaseOperation: result.supabaseOperation || 'unknown',
-        oldImagesDeleted: result.oldImagesDeleted || 0,
-        timestamp: new Date().toISOString()
-      });
-    } else {
-      console.error(`❌ Complete payload extraction failed: ${result.error}`);
-      res.status(500).json({
+    if (!result.success) {
+      return res.status(500).json({
         success: false,
         error: result.error,
-        data: result,
-        message: 'Complete payload extraction failed',
         timestamp: new Date().toISOString()
       });
     }
-
+    
+    // Fetch from DB (source of truth)
+    const dbData = await getProjectDataFromDB(url);
+    
+    if (!dbData) {
+      return res.status(500).json({
+        success: false,
+        error: 'Failed to retrieve saved data from database'
+      });
+    }
+    
+    let message = `Successfully extracted ${dbData.totalThreads} threads with ${dbData.totalScreenshots} screenshots`;
+    if (result.operation === 'updated') {
+      message += ` (Updated, replaced ${result.oldImagesDeleted} old images)`;
+    }
+    
+    res.status(200).json({
+      success: true,
+      data: dbData,
+      message: message,
+      operation: result.operation,
+      oldImagesDeleted: result.oldImagesDeleted,
+      projectId: result.projectId,
+      timestamp: new Date().toISOString()
+    });
+    
   } catch (error) {
     console.error('Server error:', error);
     res.status(500).json({
       success: false,
       error: error.message,
-      message: 'Internal server error occurred',
       timestamp: new Date().toISOString()
     });
   }
 });
 
-// Main screenshot endpoint - POST for data, GET for simple usage
-app.post('/capture', async (req, res) => {
+// Get project by URL
+app.get('/project', async (req, res) => {
   try {
-    const {
-      url,
-      numberOfImages = 1,
-      options = {}
-    } = req.body;
-
-    // Validate required parameters
+    const { url } = req.query;
+    
     if (!url) {
       return res.status(400).json({
         success: false,
-        error: 'Missing required parameter: url',
-        message: 'Please provide a URL to capture screenshots from'
+        error: 'Missing required parameter: url'
       });
     }
+    
+    const projectData = await getProjectDataFromDB(url);
+    
+    if (!projectData) {
+      return res.status(404).json({
+        success: false,
+        error: 'Project not found',
+        url: url
+      });
+    }
+    
+    res.json({
+      success: true,
+      data: projectData
+    });
+    
+  } catch (error) {
+    console.error('Error fetching project:', error);
+    res.status(500).json({
+      success: false,
+      error: error.message
+    });
+  }
+});
 
-    // Validate URL format
-    try {
-      new URL(url);
-    } catch (urlError) {
+// Search for a project by partial name (case-insensitive, returns first match)
+app.get('/project-by-name', async (req, res) => {
+  try {
+    const { name } = req.query;
+    
+    if (!name) {
       return res.status(400).json({
         success: false,
-        error: 'Invalid URL format',
-        message: 'Please provide a valid URL (including http:// or https://)'
+        error: 'Missing required query parameter: name',
+        message: 'Usage: /project-by-name?name=partialProjectName'
+      });
+    }
+    
+    const project = await getProjectByPartialName(name);
+    
+    if (!project) {
+      return res.status(404).json({
+        success: false,
+        error: 'No project found matching the given name',
+        searchTerm: name
+      });
+    }
+    
+    res.json({
+      success: true,
+      data: project
+    });
+    
+  } catch (error) {
+    console.error('Error in /project-by-name:', error);
+    res.status(500).json({
+      success: false,
+      error: error.message
+    });
+  }
+});
+
+// Get all projects (paginated)
+app.get('/projects', async (req, res) => {
+  try {
+    const limit = parseInt(req.query.limit) || 10;
+    const offset = parseInt(req.query.offset) || 0;
+    
+    const projects = await getAllProjects(limit, offset);
+    
+    res.json({
+      success: true,
+      data: projects,
+      pagination: {
+        limit: limit,
+        offset: offset,
+        count: projects.length
+      }
+    });
+    
+  } catch (error) {
+    console.error('Error fetching projects:', error);
+    res.status(500).json({
+      success: false,
+      error: error.message
+    });
+  }
+});
+
+// Get project by ID
+app.get('/project/:projectId', async (req, res) => {
+  try {
+    const { projectId } = req.params;
+    
+    const projectData = await getProjectById(projectId);
+    
+    if (!projectData) {
+      return res.status(404).json({
+        success: false,
+        error: 'Project not found'
+      });
+    }
+    
+    res.json({
+      success: true,
+      data: projectData
+    });
+    
+  } catch (error) {
+    console.error('Error fetching project:', error);
+    res.status(500).json({
+      success: false,
+      error: error.message
+    });
+  }
+});
+
+// Search threads
+app.get('/search', async (req, res) => {
+  try {
+    const { q, limit = 20 } = req.query;
+    
+    if (!q) {
+      return res.status(400).json({
+        success: false,
+        error: 'Missing search query parameter: q'
+      });
+    }
+    
+    const results = await searchThreadsByContent(q, parseInt(limit));
+    
+    res.json({
+      success: true,
+      data: results,
+      query: q,
+      count: results.length
+    });
+    
+  } catch (error) {
+    console.error('Error searching:', error);
+    res.status(500).json({
+      success: false,
+      error: error.message
+    });
+  }
+});
+
+// Get statistics
+app.get('/stats', async (req, res) => {
+  try {
+    const stats = await getStatistics();
+    
+    res.json({
+      success: true,
+      data: stats
+    });
+    
+  } catch (error) {
+    console.error('Error fetching stats:', error);
+    res.status(500).json({
+      success: false,
+      error: error.message
+    });
+  }
+});
+
+// Legacy screenshot endpoint (still supported)
+app.post('/capture', async (req, res) => {
+  try {
+    const { url, numberOfImages = 1, options = {} } = req.body;
+
+    if (!url) {
+      return res.status(400).json({
+        success: false,
+        error: 'Missing required parameter: url'
       });
     }
 
-    // Validate numberOfImages
+    try { new URL(url); } catch (urlError) {
+      return res.status(400).json({
+        success: false,
+        error: 'Invalid URL format'
+      });
+    }
+
     const numImages = parseInt(numberOfImages);
     if (isNaN(numImages) || numImages < 1 || numImages > 10) {
       return res.status(400).json({
         success: false,
-        error: 'Invalid numberOfImages',
-        message: 'numberOfImages must be a number between 1 and 10'
+        error: 'numberOfImages must be between 1 and 10'
       });
     }
 
-    // Set reasonable defaults and merge options
     const captureOptions = {
       outputDir: process.env.SCRAPER_OUTPUT_DIR || './screenshots',
       timeout: parseInt(process.env.SCRAPER_TIMEOUT) || 60000,
@@ -159,39 +320,26 @@ app.post('/capture', async (req, res) => {
       screenshotQuality: 90,
       ...options
     };
-
-    console.log(`📸 Starting screenshot capture for: ${url} (${numImages} images)`);
     
-    // Execute screenshot capture
     const result = await captureMarkupScreenshots(url, numImages, captureOptions);
     
-    // Return appropriate response
     if (result.success) {
-      console.log(`✅ Screenshot capture completed successfully`);
-      
-      // Enhanced message with URL checking info
       let message = `Successfully captured ${result.numberOfImages} screenshots`;
       if (result.supabaseOperation === 'updated') {
-        message += ` (Updated existing record, replaced ${result.oldImagesDeleted || 0} old images)`;
-      } else if (result.supabaseOperation === 'created') {
-        message += ` (Created new record)`;
+        message += ` (Updated, replaced ${result.oldImagesDeleted} old images)`;
       }
       
       res.status(200).json({
         success: true,
         data: result,
         message: message,
-        supabaseOperation: result.supabaseOperation || 'unknown',
-        oldImagesDeleted: result.oldImagesDeleted || 0,
         timestamp: new Date().toISOString()
       });
     } else {
-      console.error(`❌ Screenshot capture failed: ${result.error}`);
       res.status(500).json({
         success: false,
         error: result.error,
         data: result,
-        message: 'Screenshot capture failed',
         timestamp: new Date().toISOString()
       });
     }
@@ -201,26 +349,19 @@ app.post('/capture', async (req, res) => {
     res.status(500).json({
       success: false,
       error: error.message,
-      message: 'Internal server error occurred',
       timestamp: new Date().toISOString()
     });
   }
 });
 
-// Simple GET endpoint for quick testing
 app.get('/capture', async (req, res) => {
   try {
-    const {
-      url,
-      numberOfImages = '1',
-      debug = 'false'
-    } = req.query;
+    const { url, numberOfImages = '1', debug = 'false' } = req.query;
 
     if (!url) {
       return res.status(400).json({
         success: false,
-        error: 'Missing required parameter: url',
-        message: 'Usage: /capture?url=https://example.com&numberOfImages=1&debug=false'
+        error: 'Missing required parameter: url'
       });
     }
 
@@ -232,8 +373,6 @@ app.get('/capture', async (req, res) => {
       waitForFullscreen: true,
       screenshotQuality: 90
     };
-
-    console.log(`📸 GET request - Starting screenshot capture for: ${url}`);
     
     const result = await captureMarkupScreenshots(url, parseInt(numberOfImages), options);
     
@@ -249,7 +388,6 @@ app.get('/capture', async (req, res) => {
         success: false,
         error: result.error,
         data: result,
-        message: 'Screenshot capture failed',
         timestamp: new Date().toISOString()
       });
     }
@@ -259,13 +397,11 @@ app.get('/capture', async (req, res) => {
     res.status(500).json({
       success: false,
       error: error.message,
-      message: 'Internal server error occurred',
       timestamp: new Date().toISOString()
     });
   }
 });
 
-// Diagnosis endpoint for debugging
 app.post('/diagnose', async (req, res) => {
   try {
     const { numberOfImages = 1, options = {} } = req.body;
@@ -279,8 +415,6 @@ app.post('/diagnose', async (req, res) => {
       screenshotQuality: 90,
       ...options
     };
-
-    console.log(`🔍 Starting diagnostic capture...`);
     
     const result = await diagnoseMarkupPage(parseInt(numberOfImages), diagOptions);
     
@@ -296,105 +430,84 @@ app.post('/diagnose', async (req, res) => {
     res.status(500).json({
       success: false,
       error: error.message,
-      message: 'Diagnosis failed',
       timestamp: new Date().toISOString()
     });
   }
 });
 
-// API documentation endpoint
 app.get('/', (req, res) => {
   const docs = {
     service: 'Markup.io Screenshot & Payload Extractor API',
-    version: '2.0.0',
+    version: '3.0.0 - Normalized Structure',
     endpoints: {
-      'GET /health': 'Health check endpoint',
-      'GET /capture': 'Simple screenshot capture via query parameters',
-      'POST /capture': 'Advanced screenshot capture with JSON payload',
-      'POST /complete-payload': '🚀 OPTIMIZED: Extract threads + screenshots in single browser session',
-      'POST /diagnose': 'Run diagnostic capture with debug information',
-      'GET /': 'This documentation'
+      'GET /health': 'Health check',
+      'POST /complete-payload': 'Extract & save to normalized structure (RECOMMENDED)',
+      'GET /project?url=': 'Get project by URL',
+      'GET /projects?limit=10&offset=0': 'Get all projects (paginated)',
+      'GET /project/:projectId': 'Get project by ID',
+      'GET /search?q=term&limit=20': 'Search threads by content',
+      'GET /stats': 'Get database statistics',
+      'POST /capture': 'Legacy screenshot capture',
+      'GET /capture': 'Legacy screenshot capture (GET)',
+      'POST /diagnose': 'Diagnostic capture'
     },
     examples: {
-      'Complete Payload (RECOMMENDED)': {
+      'Extract complete payload': {
         endpoint: 'POST /complete-payload',
         body: {
           url: 'https://app.markup.io/markup/6039b445-e90e-41c4-ad51-5c46790653c0',
-          options: {
-            screenshotQuality: 90,
-            debugMode: false
-          }
-        },
-        description: 'Extracts thread data and captures screenshots in one optimized request'
-      },
-      'Simple GET request': '/capture?url=https://app.markup.io/markup/bb3022bd-01f0-4ed5-8fbb-1c5da2e3bdc7&numberOfImages=2',
-      'POST request': {
-        url: 'https://app.markup.io/markup/bb3022bd-01f0-4ed5-8fbb-1c5da2e3bdc7',
-        numberOfImages: 2,
-        options: {
-          debugMode: false,
-          screenshotQuality: 90,
-          waitForFullscreen: true
+          options: { screenshotQuality: 90 }
         }
-      }
-    },
-    environment: {
-      port: PORT,
-      nodeEnv: process.env.NODE_ENV || 'development'
+      },
+      'Get project data': 'GET /project?url=https://app.markup.io/markup/...',
+      'Search threads': 'GET /search?q=bug&limit=20',
+      'Get statistics': 'GET /stats'
     },
     features: {
-      'Single Browser Session': 'Optimized /complete-payload endpoint uses one browser for both operations',
-      'Dynamic URLs': 'All URLs are dynamic - no hardcoded values',
-      'Dynamic Screenshot Count': 'Screenshot count automatically matches thread count',
-      'Local File Saving': 'Screenshots saved locally for debugging',
-      'Supabase Integration': 'Automatic upload to Supabase storage'
+      'Normalized Database': 'Projects, threads, and comments in separate tables',
+      'URL Deduplication': 'Updates existing records instead of creating duplicates',
+      'Image Management': 'Automatic cleanup of old images on update',
+      'Full-text Search': 'Search across all comment content',
+      'Statistics': 'Track total projects, threads, and comments'
     }
   };
 
   res.json(docs);
 });
 
-// Error handling middleware
 app.use((err, req, res, next) => {
   console.error('Unhandled error:', err);
   res.status(500).json({
     success: false,
     error: 'Internal Server Error',
-    message: 'An unexpected error occurred',
     timestamp: new Date().toISOString()
   });
 });
 
-// 404 handler
 app.use((req, res) => {
   res.status(404).json({
     success: false,
     error: 'Not Found',
     message: `Endpoint ${req.method} ${req.path} not found`,
-    availableEndpoints: ['/', '/health', '/capture', '/diagnose'],
     timestamp: new Date().toISOString()
   });
 });
 
-// Start server
 app.listen(PORT, () => {
-  console.log(`🚀 Markup.io Screenshot & Payload Extractor API server running on port ${PORT}`);
-  console.log(`📋 Documentation available at: http://localhost:${PORT}/`);
+  console.log(`🚀 Server running on port ${PORT}`);
+  console.log(`📋 Documentation: http://localhost:${PORT}/`);
   console.log(`💚 Health check: http://localhost:${PORT}/health`);
-  console.log(`📸 Screenshot endpoint: http://localhost:${PORT}/capture`);
-  console.log(`🎯 OPTIMIZED Complete payload: http://localhost:${PORT}/complete-payload`);
   console.log('');
-  console.log('🚀 NEW OPTIMIZED ENDPOINT (RECOMMENDED):');
-  console.log(`curl -X POST http://localhost:${PORT}/complete-payload \\`);
-  console.log('  -H "Content-Type: application/json" \\');
-  console.log('  -d \'{"url":"https://app.markup.io/markup/6039b445-e90e-41c4-ad51-5c46790653c0"}\'');
+  console.log('✅ NORMALIZED STRUCTURE FEATURES:');
+  console.log('- Separate tables: projects, threads, comments');
+  console.log('- URL deduplication with smart updates');
+  console.log('- Automatic image cleanup');
+  console.log('- Full-text search capabilities');
+  console.log('- Statistics tracking');
   console.log('');
-  console.log('Features:');
-  console.log('✅ Single browser session (faster)');
-  console.log('✅ Dynamic URLs (no hardcoding)');
-  console.log('✅ Auto screenshot count = thread count');
-  console.log('✅ Local file saving + Supabase upload');
-  console.log('');
+  console.log('📡 RECOMMENDED ENDPOINT:');
+  console.log(`POST http://localhost:${PORT}/complete-payload`);
+  console.log('Body: {"url": "https://app.markup.io/markup/..."}');
 });
 
 module.exports = app;
