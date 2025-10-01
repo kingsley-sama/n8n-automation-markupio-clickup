@@ -396,8 +396,8 @@ class SupabaseService {
       console.log('💾 Saving to normalized tables using PostgreSQL function...');
       const { data: projectId, error: functionError } = await this.supabase
         .rpc('insert_markup_payload', {
-          p_scraped_data_id: scrapedDataId,
-          p_payload: functionPayload
+          p_payload: functionPayload,
+          p_scraped_data_id: scrapedDataId
         });
 
       if (functionError) {
@@ -552,4 +552,3 @@ class SupabaseService {
 }
 
 module.exports = SupabaseService;
-
