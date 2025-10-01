@@ -381,7 +381,105 @@ class MarkupScreenshotter {
       
       this.log('Starting screenshot capture...', 'info');
       
-      // Check if we have a scrollable canvas in fullscreen mode
+      // Get image dimensions and information
+      const imageInfo = await this.page.evaluate(() => {
+        const img = document.querySelector('#image-container img');
+        if (!img) {
+          return { hasImage: false };
+        }
+        
+        // Wait for image to fully load
+        if (!img.complete) {
+          return new Promise((resolve) => {
+            img.onload = () => {
+              resolve({
+                hasImage: true,
+                naturalWidth: img.naturalWidth,
+                naturalHeight: img.naturalHeight,
+                src: img.src
+              });
+            };
+            setTimeout(() => resolve({ hasImage: false }), 5000);
+          });
+        }
+        
+        return {
+          hasImage: true,
+          naturalWidth: img.naturalWidth,
+          naturalHeight: img.naturalHeight,
+          src: img.src
+        };
+      });
+      
+      // If we have an image, use the optimized single-shot capture method
+      if (imageInfo.hasImage && imageInfo.naturalWidth && imageInfo.naturalHeight) {
+        this.log('🎯 Detected image in container', 'info');
+        this.log(`📐 Image dimensions: ${imageInfo.naturalWidth}x${imageInfo.naturalHeight}px`, 'info');
+        
+        // Wait for image to be fully loaded
+        await this.page.evaluate(() => {
+          return new Promise((resolve) => {
+            const img = document.querySelector('#image-container img');
+            if (img && img.complete) {
+              resolve();
+            } else if (img) {
+              img.onload = resolve;
+              setTimeout(resolve, 5000);
+            } else {
+              resolve();
+            }
+          });
+        });
+        
+        // Set viewport to accommodate the full image (with some padding for UI elements)
+        const newWidth = Math.max(1920, Math.ceil(imageInfo.naturalWidth));
+        const newHeight = Math.max(1080, Math.ceil(imageInfo.naturalHeight));
+        
+        this.log(`🔧 Adjusting viewport to ${newWidth}x${newHeight}px to capture full image`, 'info');
+        
+        await this.page.setViewport({
+          width: newWidth,
+          height: newHeight
+        });
+        
+        // Wait for viewport adjustment and any re-rendering
+        await this.delay(1000);
+        
+        // Get the image element and take screenshot
+        const imageElement = await this.page.$('#image-container img');
+        
+        if (imageElement) {
+          const boundingBox = await imageElement.boundingBox();
+          this.log(`Image bounding box: ${Math.ceil(boundingBox.width)}x${Math.ceil(boundingBox.height)}px`, 'debug');
+          
+          // Screenshot the image element directly
+          const screenshotBuffer = await imageElement.screenshot({
+            type: 'jpeg',
+            quality: this.options.screenshotQuality
+          });
+          
+          // Store screenshot data with metadata
+          this.screenshots.push({
+            filename: jpegFilename,
+            buffer: screenshotBuffer,
+            size: screenshotBuffer.length
+          });
+          
+          const fileSizeKB = (screenshotBuffer.length / 1024).toFixed(1);
+          const fileSizeMB = (screenshotBuffer.length / (1024 * 1024)).toFixed(2);
+          this.log(`✅ Full image screenshot captured! Size: ${fileSizeKB}KB (${fileSizeMB}MB)`, 'success');
+          
+          // Reset viewport to original size for next image
+          await this.page.setViewport({
+            width: this.options.viewport.width,
+            height: this.options.viewport.height
+          });
+          
+          return;
+        }
+      }
+      
+      // Fallback: Check if we have a scrollable canvas in fullscreen mode
       const scrollableInfo = await this.page.evaluate((selector) => {
         const scrollableCanvas = document.querySelector(selector);
         if (!scrollableCanvas) {
@@ -435,7 +533,7 @@ class MarkupScreenshotter {
       
       // If we have a scrollable canvas in fullscreen, use specialized capture
       if (scrollableInfo.hasScrollableCanvas && scrollableInfo.isFullscreen && scrollableInfo.isScrollable) {
-        this.log('🎯 Detected scrollable canvas in fullscreen mode', 'info');
+        this.log('🎯 Detected scrollable canvas in fullscreen mode (fallback method)', 'info');
         this.log(`📐 Canvas dimensions: ${scrollableInfo.dimensions.scrollWidth}x${scrollableInfo.dimensions.scrollHeight}px`, 'info');
         this.log(`👁️  Visible area: ${scrollableInfo.dimensions.clientWidth}x${scrollableInfo.dimensions.clientHeight}px`, 'info');
         
