@@ -25,6 +25,7 @@ class MarkupScreenshotter {
     this.options = {
       // Default configuration
       numberOfImages: 1,
+      threadNames: null, // Optional: array of thread names for smart matching
       timeout: parseInt(process.env.SCRAPER_TIMEOUT) || 90000, // Increased to 90 seconds
       retryAttempts: parseInt(process.env.SCRAPER_RETRY_ATTEMPTS) || 3,
       retryDelay: 2000,
@@ -637,6 +638,53 @@ class MarkupScreenshotter {
     this.log(`🎯 Screenshot saved: ${jpegFilename}`, 'success');
   }
 
+  async getCurrentImageName() {
+    try {
+      const imageName = await this.page.evaluate(() => {
+        const nameElement = document.querySelector('.mk-inline-edit__display span.value');
+        return nameElement ? nameElement.textContent.trim() : null;
+      });
+      
+      if (imageName) {
+        this.log(`📝 Current image name: ${imageName}`, 'debug');
+      }
+      
+      return imageName;
+    } catch (error) {
+      this.log(`Failed to get image name: ${error.message}`, 'warn');
+      return null;
+    }
+  }
+
+  extractBaseFilename(threadName) {
+    // Extract base filename from thread name
+    // Example: "01. 1234-56a TEST Folder.jpg" -> "1234-56a TEST Folder.jpg"
+    if (!threadName) return null;
+    
+    // Remove leading number and dot pattern (e.g., "01. " or "1. ")
+    const match = threadName.match(/^\d+\.\s*(.+)$/);
+    const baseFilename = match ? match[1] : threadName;
+    
+    this.log(`📋 Thread name: "${threadName}" -> Base filename: "${baseFilename}"`, 'debug');
+    return baseFilename;
+  }
+
+  matchesThreadName(imageName, threadName) {
+    if (!imageName || !threadName) return false;
+    
+    const baseFilename = this.extractBaseFilename(threadName);
+    if (!baseFilename) return false;
+    
+    // Compare case-insensitive
+    const match = imageName.toLowerCase() === baseFilename.toLowerCase();
+    
+    if (match) {
+      this.log(`✅ Match found: "${imageName}" === "${baseFilename}"`, 'success');
+    }
+    
+    return match;
+  }
+
   async navigateToNextImage(imageIndex) {
     await this.retry(async () => {
       this.log(`Navigating to image ${imageIndex}...`);
@@ -739,6 +787,128 @@ class MarkupScreenshotter {
         }
       }
     }
+  }
+
+  async captureImagesMatchingThreads(threadNames) {
+    if (!threadNames || threadNames.length === 0) {
+      this.log('No thread names provided, falling back to sequential capture', 'warn');
+      return await this.captureMultipleImages();
+    }
+
+    this.log(`Starting smart capture for ${threadNames.length} threads...`, 'info');
+    const matchedScreenshots = new Map(); // threadName -> screenshot
+    let currentImageIndex = 1;
+    const maxAttempts = threadNames.length * 3; // Safety limit
+    let attempts = 0;
+    
+    // Check first image
+    const firstImageName = await this.getCurrentImageName();
+    
+    // Try to match first image with any thread
+    let firstImageMatched = false;
+    for (const threadName of threadNames) {
+      if (this.matchesThreadName(firstImageName, threadName)) {
+        this.log(`✅ First image matches thread: "${threadName}"`, 'success');
+        await this.takeScreenshot(`thread_${currentImageIndex}.jpg`);
+        matchedScreenshots.set(threadName, {
+          filename: `thread_${currentImageIndex}.jpg`,
+          buffer: this.screenshots[this.screenshots.length - 1].buffer,
+          size: this.screenshots[this.screenshots.length - 1].size,
+          threadName: threadName
+        });
+        firstImageMatched = true;
+        break;
+      }
+    }
+    
+    if (!firstImageMatched) {
+      this.log(`⚠️  First image "${firstImageName}" doesn't match any thread, skipping...`, 'warn');
+    }
+    
+    // Navigate through remaining images
+    while (matchedScreenshots.size < threadNames.length && attempts < maxAttempts) {
+      attempts++;
+      
+      try {
+        // Navigate to next image
+        await this.navigateToNextImage(currentImageIndex + 1);
+        currentImageIndex++;
+        
+        // Get current image name
+        const currentImageName = await this.getCurrentImageName();
+        
+        if (!currentImageName) {
+          this.log(`⚠️  Could not get image name for image ${currentImageIndex}, skipping...`, 'warn');
+          continue;
+        }
+        
+        // Check if this image matches any remaining thread
+        let matched = false;
+        for (const threadName of threadNames) {
+          if (matchedScreenshots.has(threadName)) {
+            continue; // Already captured this thread
+          }
+          
+          if (this.matchesThreadName(currentImageName, threadName)) {
+            this.log(`✅ Image ${currentImageIndex} matches thread: "${threadName}"`, 'success');
+            
+            // Capture screenshot for this thread
+            await this.takeScreenshot(`thread_${matchedScreenshots.size + 1}.jpg`);
+            matchedScreenshots.set(threadName, {
+              filename: `thread_${matchedScreenshots.size + 1}.jpg`,
+              buffer: this.screenshots[this.screenshots.length - 1].buffer,
+              size: this.screenshots[this.screenshots.length - 1].size,
+              threadName: threadName
+            });
+            
+            matched = true;
+            break;
+          }
+        }
+        
+        if (!matched) {
+          this.log(`⏭️  Image ${currentImageIndex} ("${currentImageName}") doesn't match any remaining thread, skipping...`, 'info');
+        }
+        
+        // If we've matched all threads, stop
+        if (matchedScreenshots.size === threadNames.length) {
+          this.log(`🎉 All ${threadNames.length} threads matched!`, 'success');
+          break;
+        }
+        
+      } catch (error) {
+        this.log(`Error navigating to image ${currentImageIndex}: ${error.message}`, 'warn');
+        
+        // Check if we've reached the end (no more next button)
+        const hasNextButton = await this.page.evaluate(() => {
+          const nextSelectors = ['.right-flipper', '.next-button', '[class*="next"]'];
+          for (const selector of nextSelectors) {
+            const button = document.querySelector(selector);
+            if (button) {
+              const style = window.getComputedStyle(button);
+              return style.display !== 'none' && !button.disabled;
+            }
+          }
+          return false;
+        });
+        
+        if (!hasNextButton) {
+          this.log('No more images available, stopping navigation', 'info');
+          break;
+        }
+      }
+    }
+    
+    // Report results
+    if (matchedScreenshots.size < threadNames.length) {
+      const unmatchedThreads = threadNames.filter(t => !matchedScreenshots.has(t));
+      this.log(`⚠️  Warning: Only matched ${matchedScreenshots.size}/${threadNames.length} threads`, 'warn');
+      this.log(`Unmatched threads: ${unmatchedThreads.join(', ')}`, 'warn');
+    } else {
+      this.log(`✅ Successfully matched all ${threadNames.length} threads with images`, 'success');
+    }
+    
+    return matchedScreenshots;
   }
 
   // Auto-scroll function to progressively scroll through content and load it all
@@ -1175,7 +1345,8 @@ class MarkupScreenshotter {
     this.log(`Starting scraping session: ${this.sessionId}`);
     
     try {
-      this.log(`Starting screenshot capture for ${this.options.numberOfImages} images...`);
+      const captureMode = this.options.threadNames ? 'smart matching' : 'sequential';
+      this.log(`Starting screenshot capture (${captureMode} mode) for ${this.options.numberOfImages} images...`);
       
       // Initialize
       await this.initializeBrowser();
@@ -1190,8 +1361,14 @@ class MarkupScreenshotter {
       // Additional wait for everything to settle
       await this.delay(2000);
       
-      // Capture images
-      await this.captureMultipleImages();
+      // Capture images - use smart matching if thread names provided
+      if (this.options.threadNames && this.options.threadNames.length > 0) {
+        this.log(`Using smart capture with ${this.options.threadNames.length} thread names`, 'info');
+        await this.captureImagesMatchingThreads(this.options.threadNames);
+      } else {
+        this.log('Using sequential capture (no thread names provided)', 'info');
+        await this.captureMultipleImages();
+      }
       
       // Generate diagnostic info if in debug mode
       await this.generateDiagnosticInfo();

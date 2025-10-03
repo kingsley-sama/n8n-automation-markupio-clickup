@@ -149,12 +149,13 @@ async function expandAllThreadGroupsFromPage(page) {
   }
 }
 
-async function takeScreenshotsFromPage(existingPage, url, numberOfImages, options = {}) {
+async function takeScreenshotsFromPage(existingPage, url, numberOfImages, threadNames = null, options = {}) {
   const startTime = Date.now();
   
   try {
     const screenshotter = new MarkupScreenshotter({
       numberOfImages: numberOfImages,
+      threadNames: threadNames, // Pass thread names for smart matching
       debugMode: options.debugMode || false,
       screenshotQuality: options.screenshotQuality || 90,
       timeout: options.timeout || 90000,
@@ -176,7 +177,15 @@ async function takeScreenshotsFromPage(existingPage, url, numberOfImages, option
     await screenshotter.waitForImagesLoad();
     await screenshotter.enableFullscreen();
     await screenshotter.delay(2000);
-    await screenshotter.captureMultipleImages();
+    
+    // Use smart capture if thread names provided, otherwise sequential
+    if (threadNames && threadNames.length > 0) {
+      console.log(`📸 Using smart capture with ${threadNames.length} thread names`);
+      await screenshotter.captureImagesMatchingThreads(threadNames);
+    } else {
+      console.log(`📸 Using sequential capture (no thread names)`);
+      await screenshotter.captureMultipleImages();
+    }
     
     const duration = ((Date.now() - startTime) / 1000).toFixed(2);
     
@@ -231,9 +240,14 @@ async function getCompletePayload(url, options = {}) {
     const threadData = await extractThreadDataFromPage(page);
     
     const numberOfImages = threadData.threads.length;
-    console.log(`📸 Taking ${numberOfImages} screenshots...`);
     
-    const screenshotResult = await takeScreenshotsFromPage(page, url, numberOfImages, {
+    // Extract thread names for smart matching
+    const threadNames = threadData.threads.map(thread => thread.threadName);
+    console.log(`📋 Thread names extracted: ${threadNames.join(', ')}`);
+    
+    console.log(`📸 Taking ${numberOfImages} screenshots with smart matching...`);
+    
+    const screenshotResult = await takeScreenshotsFromPage(page, url, numberOfImages, threadNames, {
       screenshotQuality: options.screenshotQuality || 90,
       debugMode: options.debugMode || false
     });

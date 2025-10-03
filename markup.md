@@ -1,0 +1,4 @@
+- Olawale
+    - get all the pms to install the watcher app
+    - for next week wale will fix the issues on the issue log and get pms to use the markup flow and also for project intake he will be testing that for now.
+- wale needs some of 

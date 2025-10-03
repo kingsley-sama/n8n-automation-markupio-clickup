@@ -305,3 +305,4 @@ BEGIN
 END $$;
 
 SELECT '✅ Database setup complete! Function is ready to use.' AS status;
+ 
