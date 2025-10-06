@@ -651,7 +651,20 @@ class MarkupScreenshotter {
       
       return imageName;
     } catch (error) {
-      this.log(`Failed to get image name: ${error.message}`, 'warn');
+      const errorMsg = `Failed to get image name from fullscreen view: ${error.message}`;
+      this.log(errorMsg, 'error');
+      
+      // Log to error table with full context
+      if (this.supabaseService && this.sessionId) {
+        await this.supabaseService.log('error', errorMsg, error, {
+          url: this.currentUrl,
+          title: this.currentTitle,
+          operation: 'getCurrentImageName',
+          selector: '.mk-inline-edit__display span.value',
+          stack: error.stack
+        });
+      }
+      
       return null;
     }
   }
@@ -801,114 +814,166 @@ class MarkupScreenshotter {
     const maxAttempts = threadNames.length * 3; // Safety limit
     let attempts = 0;
     
-    // Check first image
-    const firstImageName = await this.getCurrentImageName();
-    
-    // Try to match first image with any thread
-    let firstImageMatched = false;
-    for (const threadName of threadNames) {
-      if (this.matchesThreadName(firstImageName, threadName)) {
-        this.log(`✅ First image matches thread: "${threadName}"`, 'success');
-        await this.takeScreenshot(`thread_${currentImageIndex}.jpg`);
-        matchedScreenshots.set(threadName, {
-          filename: `thread_${currentImageIndex}.jpg`,
-          buffer: this.screenshots[this.screenshots.length - 1].buffer,
-          size: this.screenshots[this.screenshots.length - 1].size,
-          threadName: threadName
-        });
-        firstImageMatched = true;
-        break;
-      }
-    }
-    
-    if (!firstImageMatched) {
-      this.log(`⚠️  First image "${firstImageName}" doesn't match any thread, skipping...`, 'warn');
-    }
-    
-    // Navigate through remaining images
-    while (matchedScreenshots.size < threadNames.length && attempts < maxAttempts) {
-      attempts++;
+    try {
+      // Check first image
+      const firstImageName = await this.getCurrentImageName();
       
-      try {
-        // Navigate to next image
-        await this.navigateToNextImage(currentImageIndex + 1);
-        currentImageIndex++;
-        
-        // Get current image name
-        const currentImageName = await this.getCurrentImageName();
-        
-        if (!currentImageName) {
-          this.log(`⚠️  Could not get image name for image ${currentImageIndex}, skipping...`, 'warn');
-          continue;
+      // Try to match first image with any thread
+      let firstImageMatched = false;
+      for (const threadName of threadNames) {
+        if (this.matchesThreadName(firstImageName, threadName)) {
+          this.log(`✅ First image matches thread: "${threadName}"`, 'success');
+          await this.takeScreenshot(`thread_${currentImageIndex}.jpg`);
+          matchedScreenshots.set(threadName, {
+            filename: `thread_${currentImageIndex}.jpg`,
+            buffer: this.screenshots[this.screenshots.length - 1].buffer,
+            size: this.screenshots[this.screenshots.length - 1].size,
+            threadName: threadName
+          });
+          firstImageMatched = true;
+          break;
         }
+      }
+      
+      if (!firstImageMatched) {
+        this.log(`⚠️  First image "${firstImageName}" doesn't match any thread, skipping...`, 'warn');
+      }
+      
+      // Navigate through remaining images
+      while (matchedScreenshots.size < threadNames.length && attempts < maxAttempts) {
+        attempts++;
         
-        // Check if this image matches any remaining thread
-        let matched = false;
-        for (const threadName of threadNames) {
-          if (matchedScreenshots.has(threadName)) {
-            continue; // Already captured this thread
+        try {
+          // Navigate to next image
+          await this.navigateToNextImage(currentImageIndex + 1);
+          currentImageIndex++;
+          
+          // Get current image name
+          const currentImageName = await this.getCurrentImageName();
+          
+          if (!currentImageName) {
+            this.log(`⚠️  Could not get image name for image ${currentImageIndex}, skipping...`, 'warn');
+            continue;
           }
           
-          if (this.matchesThreadName(currentImageName, threadName)) {
-            this.log(`✅ Image ${currentImageIndex} matches thread: "${threadName}"`, 'success');
+          // Check if this image matches any remaining thread
+          let matched = false;
+          for (const threadName of threadNames) {
+            if (matchedScreenshots.has(threadName)) {
+              continue; // Already captured this thread
+            }
             
-            // Capture screenshot for this thread
-            await this.takeScreenshot(`thread_${matchedScreenshots.size + 1}.jpg`);
-            matchedScreenshots.set(threadName, {
-              filename: `thread_${matchedScreenshots.size + 1}.jpg`,
-              buffer: this.screenshots[this.screenshots.length - 1].buffer,
-              size: this.screenshots[this.screenshots.length - 1].size,
-              threadName: threadName
+            if (this.matchesThreadName(currentImageName, threadName)) {
+              this.log(`✅ Image ${currentImageIndex} matches thread: "${threadName}"`, 'success');
+              
+              // Capture screenshot for this thread
+              await this.takeScreenshot(`thread_${matchedScreenshots.size + 1}.jpg`);
+              matchedScreenshots.set(threadName, {
+                filename: `thread_${matchedScreenshots.size + 1}.jpg`,
+                buffer: this.screenshots[this.screenshots.length - 1].buffer,
+                size: this.screenshots[this.screenshots.length - 1].size,
+                threadName: threadName
+              });
+              
+              matched = true;
+              break;
+            }
+          }
+          
+          if (!matched) {
+            this.log(`⏭️  Image ${currentImageIndex} ("${currentImageName}") doesn't match any remaining thread, skipping...`, 'info');
+          }
+          
+          // If we've matched all threads, stop
+          if (matchedScreenshots.size === threadNames.length) {
+            this.log(`🎉 All ${threadNames.length} threads matched!`, 'success');
+            break;
+          }
+          
+        } catch (error) {
+          const errorMsg = `Error navigating to image ${currentImageIndex}: ${error.message}`;
+          this.log(errorMsg, 'warn');
+          
+          // Log navigation errors
+          if (this.supabaseService && this.sessionId) {
+            await this.supabaseService.log('error', errorMsg, error, {
+              url: this.currentUrl,
+              title: this.currentTitle,
+              operation: 'captureImagesMatchingThreads - navigation',
+              imageIndex: currentImageIndex,
+              matchedSoFar: matchedScreenshots.size,
+              totalThreads: threadNames.length,
+              attempts: attempts,
+              stack: error.stack
             });
-            
-            matched = true;
+          }
+          
+          // Check if we've reached the end (no more next button)
+          const hasNextButton = await this.page.evaluate(() => {
+            const nextSelectors = ['.right-flipper', '.next-button', '[class*="next"]'];
+            for (const selector of nextSelectors) {
+              const button = document.querySelector(selector);
+              if (button) {
+                const style = window.getComputedStyle(button);
+                return style.display !== 'none' && !button.disabled;
+              }
+            }
+            return false;
+          });
+          
+          if (!hasNextButton) {
+            this.log('No more images available, stopping navigation', 'info');
             break;
           }
         }
-        
-        if (!matched) {
-          this.log(`⏭️  Image ${currentImageIndex} ("${currentImageName}") doesn't match any remaining thread, skipping...`, 'info');
-        }
-        
-        // If we've matched all threads, stop
-        if (matchedScreenshots.size === threadNames.length) {
-          this.log(`🎉 All ${threadNames.length} threads matched!`, 'success');
-          break;
-        }
-        
-      } catch (error) {
-        this.log(`Error navigating to image ${currentImageIndex}: ${error.message}`, 'warn');
-        
-        // Check if we've reached the end (no more next button)
-        const hasNextButton = await this.page.evaluate(() => {
-          const nextSelectors = ['.right-flipper', '.next-button', '[class*="next"]'];
-          for (const selector of nextSelectors) {
-            const button = document.querySelector(selector);
-            if (button) {
-              const style = window.getComputedStyle(button);
-              return style.display !== 'none' && !button.disabled;
-            }
-          }
-          return false;
-        });
-        
-        if (!hasNextButton) {
-          this.log('No more images available, stopping navigation', 'info');
-          break;
-        }
       }
+      
+      // Report results
+      if (matchedScreenshots.size < threadNames.length) {
+        const unmatchedThreads = threadNames.filter(t => !matchedScreenshots.has(t));
+        const warningMsg = `Only matched ${matchedScreenshots.size}/${threadNames.length} threads. Unmatched: ${unmatchedThreads.join(', ')}`;
+        this.log(`⚠️  Warning: ${warningMsg}`, 'warn');
+        
+        // Log incomplete matching to error table
+        if (this.supabaseService && this.sessionId) {
+          await this.supabaseService.log('error', warningMsg, null, {
+            url: this.currentUrl,
+            title: this.currentTitle,
+            operation: 'captureImagesMatchingThreads - incomplete',
+            matchedCount: matchedScreenshots.size,
+            expectedCount: threadNames.length,
+            unmatchedThreads: unmatchedThreads,
+            matchedThreads: Array.from(matchedScreenshots.keys()),
+            totalAttempts: attempts
+          });
+        }
+      } else {
+        this.log(`✅ Successfully matched all ${threadNames.length} threads with images`, 'success');
+      }
+      
+      return matchedScreenshots;
+      
+    } catch (error) {
+      const errorMsg = `Fatal error in smart screenshot matching: ${error.message}`;
+      this.log(errorMsg, 'error');
+      
+      // Log fatal errors to error table
+      if (this.supabaseService && this.sessionId) {
+        await this.supabaseService.log('error', errorMsg, error, {
+          url: this.currentUrl,
+          title: this.currentTitle,
+          operation: 'captureImagesMatchingThreads - fatal',
+          threadNames: threadNames,
+          matchedCount: matchedScreenshots.size,
+          expectedCount: threadNames.length,
+          attempts: attempts,
+          stack: error.stack
+        });
+      }
+      
+      // Re-throw to let caller handle
+      throw new Error(`Smart matching failed: ${error.message}`);
     }
-    
-    // Report results
-    if (matchedScreenshots.size < threadNames.length) {
-      const unmatchedThreads = threadNames.filter(t => !matchedScreenshots.has(t));
-      this.log(`⚠️  Warning: Only matched ${matchedScreenshots.size}/${threadNames.length} threads`, 'warn');
-      this.log(`Unmatched threads: ${unmatchedThreads.join(', ')}`, 'warn');
-    } else {
-      this.log(`✅ Successfully matched all ${threadNames.length} threads with images`, 'success');
-    }
-    
-    return matchedScreenshots;
   }
 
   // Auto-scroll function to progressively scroll through content and load it all

@@ -151,6 +151,8 @@ async function expandAllThreadGroupsFromPage(page) {
 
 async function takeScreenshotsFromPage(existingPage, url, numberOfImages, threadNames = null, options = {}) {
   const startTime = Date.now();
+  const supabaseService = new SupabaseService();
+  const sessionId = supabaseService.initializeSession();
   
   try {
     const screenshotter = new MarkupScreenshotter({
@@ -165,26 +167,81 @@ async function takeScreenshotsFromPage(existingPage, url, numberOfImages, thread
     screenshotter.page = existingPage;
     screenshotter.browser = existingPage.browser();
     screenshotter.currentUrl = url;
-    screenshotter.sessionId = screenshotter.supabaseService.initializeSession();
+    screenshotter.sessionId = sessionId;
     screenshotter.currentTitle = await existingPage.title();
     
     await existingPage.setViewport(screenshotter.options.viewport);
     existingPage.setDefaultTimeout(screenshotter.options.timeout);
     existingPage.setDefaultNavigationTimeout(screenshotter.options.timeout);
     
-    await screenshotter.handleOverlays();
+    try {
+      await screenshotter.handleOverlays();
+    } catch (error) {
+      const errorMsg = `Failed to handle overlays: ${error.message}`;
+      console.warn(`⚠️  ${errorMsg}`);
+      await supabaseService.log('error', errorMsg, error, {
+        url: url,
+        operation: 'handleOverlays',
+        sessionId: sessionId,
+        stack: error.stack
+      });
+      // Continue anyway
+    }
+    
     await screenshotter.waitForImageContainer();
     await screenshotter.waitForImagesLoad();
-    await screenshotter.enableFullscreen();
+    
+    try {
+      await screenshotter.enableFullscreen();
+    } catch (error) {
+      const errorMsg = `Failed to enable fullscreen (continuing anyway): ${error.message}`;
+      console.warn(`⚠️  ${errorMsg}`);
+      await supabaseService.log('error', errorMsg, error, {
+        url: url,
+        operation: 'enableFullscreen',
+        sessionId: sessionId,
+        stack: error.stack
+      });
+      // Continue anyway
+    }
+    
     await screenshotter.delay(2000);
     
     // Use smart capture if thread names provided, otherwise sequential
     if (threadNames && threadNames.length > 0) {
       console.log(`📸 Using smart capture with ${threadNames.length} thread names`);
-      await screenshotter.captureImagesMatchingThreads(threadNames);
+      try {
+        await screenshotter.captureImagesMatchingThreads(threadNames);
+      } catch (error) {
+        const errorMsg = `Smart capture failed: ${error.message}`;
+        console.error(`❌ ${errorMsg}`);
+        await supabaseService.log('error', errorMsg, error, {
+          url: url,
+          operation: 'captureImagesMatchingThreads',
+          sessionId: sessionId,
+          threadNames: threadNames,
+          capturedCount: screenshotter.screenshots.length,
+          stack: error.stack
+        });
+        throw error; // Re-throw to fail the operation
+      }
     } else {
       console.log(`📸 Using sequential capture (no thread names)`);
-      await screenshotter.captureMultipleImages();
+      try {
+        await screenshotter.captureMultipleImages();
+      } catch (error) {
+        const errorMsg = `Sequential capture failed: ${error.message}`;
+        console.error(`❌ ${errorMsg}`);
+        await supabaseService.log('error', errorMsg, error, {
+          url: url,
+          operation: 'captureMultipleImages',
+          sessionId: sessionId,
+          numberOfImages: numberOfImages,
+          capturedCount: screenshotter.screenshots.length,
+          stack: error.stack
+        });
+        throw error; // Re-throw to fail the operation
+      }
     }
     
     const duration = ((Date.now() - startTime) / 1000).toFixed(2);
@@ -196,7 +253,19 @@ async function takeScreenshotsFromPage(existingPage, url, numberOfImages, thread
       duration: parseFloat(duration)
     };
   } catch (error) {
-    console.error(`Screenshot capture failed: ${error.message}`);
+    const errorMsg = `Screenshot capture failed: ${error.message}`;
+    console.error(errorMsg);
+    
+    // Log final error
+    await supabaseService.log('error', errorMsg, error, {
+      url: url,
+      operation: 'takeScreenshotsFromPage - fatal',
+      sessionId: sessionId,
+      numberOfImages: numberOfImages,
+      threadNames: threadNames,
+      stack: error.stack
+    });
+    
     return {
       success: false,
       error: error.message,
@@ -213,6 +282,8 @@ async function getCompletePayload(url, options = {}) {
   if (!url) throw new Error('URL is required');
   
   let browser = null;
+  const supabaseService = new SupabaseService();
+  const sessionId = supabaseService.initializeSession();
   
   try {
     browser = await puppeteer.launch({
@@ -237,7 +308,23 @@ async function getCompletePayload(url, options = {}) {
     await page.goto(url, { waitUntil: 'networkidle2', timeout: 80000 });
     
     console.log('📝 Extracting thread data...');
-    const threadData = await extractThreadDataFromPage(page);
+    let threadData;
+    try {
+      threadData = await extractThreadDataFromPage(page);
+    } catch (error) {
+      const errorMsg = `Failed to extract thread data: ${error.message}`;
+      console.error(`❌ ${errorMsg}`);
+      
+      // Log thread extraction error
+      await supabaseService.log('error', errorMsg, error, {
+        url: url,
+        operation: 'extractThreadDataFromPage',
+        sessionId: sessionId,
+        stack: error.stack
+      });
+      
+      throw new Error(errorMsg);
+    }
     
     const numberOfImages = threadData.threads.length;
     
@@ -247,18 +334,34 @@ async function getCompletePayload(url, options = {}) {
     
     console.log(`📸 Taking ${numberOfImages} screenshots with smart matching...`);
     
-    const screenshotResult = await takeScreenshotsFromPage(page, url, numberOfImages, threadNames, {
-      screenshotQuality: options.screenshotQuality || 90,
-      debugMode: options.debugMode || false
-    });
-    
-    if (!screenshotResult.success) {
-      throw new Error(`Screenshot capture failed: ${screenshotResult.error}`);
+    let screenshotResult;
+    try {
+      screenshotResult = await takeScreenshotsFromPage(page, url, numberOfImages, threadNames, {
+        screenshotQuality: options.screenshotQuality || 90,
+        debugMode: options.debugMode || false
+      });
+      
+      if (!screenshotResult.success) {
+        throw new Error(`Screenshot capture failed: ${screenshotResult.error}`);
+      }
+    } catch (error) {
+      const errorMsg = `Screenshot capture failed during smart matching: ${error.message}`;
+      console.error(`❌ ${errorMsg}`);
+      
+      // Log screenshot capture error
+      await supabaseService.log('error', errorMsg, error, {
+        url: url,
+        operation: 'takeScreenshotsFromPage - smart matching',
+        sessionId: sessionId,
+        numberOfImages: numberOfImages,
+        threadNames: threadNames,
+        stack: error.stack
+      });
+      
+      throw new Error(errorMsg);
     }
     
     console.log('💾 Saving to normalized database structure...');
-    const supabaseService = new SupabaseService();
-    const sessionId = supabaseService.initializeSession();
     
     const threadsWithScreenshots = threadData.threads.map((thread, index) => ({
       ...thread,
@@ -278,7 +381,25 @@ async function getCompletePayload(url, options = {}) {
       sessionId: sessionId
     };
 
-    const supabaseResult = await supabaseService.saveCompletePayloadNormalized(payloadToSave);
+    let supabaseResult;
+    try {
+      supabaseResult = await supabaseService.saveCompletePayloadNormalized(payloadToSave);
+    } catch (error) {
+      const errorMsg = `Failed to save payload to database: ${error.message}`;
+      console.error(`❌ ${errorMsg}`);
+      
+      // Log database save error
+      await supabaseService.log('error', errorMsg, error, {
+        url: url,
+        operation: 'saveCompletePayloadNormalized',
+        sessionId: sessionId,
+        totalThreads: threadData.threads.length,
+        totalScreenshots: numberOfImages,
+        stack: error.stack
+      });
+      
+      throw new Error(errorMsg);
+    }
     
     const duration = ((Date.now() - startTime) / 1000).toFixed(2);
     console.log(`✅ Complete payload saved in ${duration}s`);
@@ -298,6 +419,15 @@ async function getCompletePayload(url, options = {}) {
     
   } catch (error) {
     console.error('❌ Payload extraction failed:', error.message);
+    
+    // Log final catch-all error
+    await supabaseService.log('error', `Complete payload extraction failed: ${error.message}`, error, {
+      url: url,
+      operation: 'getCompletePayload - fatal',
+      sessionId: sessionId,
+      stack: error.stack
+    });
+    
     return {
       success: false,
       error: error.message,
