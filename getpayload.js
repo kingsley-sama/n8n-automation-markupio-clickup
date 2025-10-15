@@ -2,6 +2,128 @@ const puppeteer = require('puppeteer');
 const { MarkupScreenshotter } = require('./db_helper.js');
 const SupabaseService = require('./supabase-service.js');
 
+/**
+ * Collect attachments by clicking each comment's attachment indicator
+ * Maps attachments to specific comments by their pin number
+ */
+async function collectAttachmentsFromAllThreads(page) {
+  const attachmentsByThreadAndPin = {};
+  
+  try {
+    console.log('📎 Collecting attachments from all comments...\n');
+    
+    // Find all thread groups
+    let threadGroups = await page.$$('div.thread-list-group');
+    
+    for (let groupIndex = 0; groupIndex < threadGroups.length; groupIndex++) {
+      const group = threadGroups[groupIndex];
+      
+      // Get thread name
+      const nameElement = await group.$('span.thread-list-item-group-header-label');
+      let threadName = nameElement 
+        ? (await page.evaluate(el => el.textContent.trim(), nameElement)) 
+        : `Thread ${groupIndex + 1}`;
+      
+      if (!threadName) continue;
+      
+      console.log(`   📌 Thread: ${threadName}`);
+      
+      // Find all comments with attachments in this thread
+      const commentElements = await group.$$('div[data-thread-id]');
+      
+      for (let msgIndex = 0; msgIndex < commentElements.length; msgIndex++) {
+        const messageEl = commentElements[msgIndex];
+        
+        // Check if this comment has attachments
+        const attachmentContainer = await messageEl.$('.thread-list-item-attachment-count');
+        
+        if (!attachmentContainer) continue;
+        
+        // Get pin number for this comment
+        let pinNumber = null;
+        const pinSelectors = ['.thread-label', '.pin-label', '.label-button', '.pin-number'];
+        for (const selector of pinSelectors) {
+          const pinElement = await messageEl.$(selector);
+          if (pinElement) {
+            const pinText = await page.evaluate(el => el.textContent.trim(), pinElement);
+            const extractedPin = parseInt(pinText.match(/\d+/)?.[0]);
+            if (extractedPin && !isNaN(extractedPin)) {
+              pinNumber = extractedPin;
+              break;
+            }
+          }
+        }
+        
+        if (!pinNumber) {
+          console.log(`      ⚠️  Could not determine pin number for comment ${msgIndex + 1}, skipping`);
+          continue;
+        }
+        
+        console.log(`      📎 Pin ${pinNumber}: Clicking to reveal attachments...`);
+        
+        // Scroll into view
+        await page.evaluate(el => el.scrollIntoView({ behavior: 'smooth', block: 'center' }), attachmentContainer);
+        await new Promise(resolve => setTimeout(resolve, 300));
+        
+        // Click to open attachment view/sidebar
+        await attachmentContainer.click();
+        await new Promise(resolve => setTimeout(resolve, 2000)); // Wait for sidebar/modal to open
+        
+        // Extract attachment URLs
+        const attachmentUrls = await page.evaluate(() => {
+          const urls = [];
+          const images = document.querySelectorAll('img.associated-file-content.attachment-thumbnail');
+          
+          images.forEach(img => {
+            let url = img.getAttribute('src');
+            if (url && url.trim() && !url.startsWith('data:')) {
+              // Strip query parameters
+              if (url.includes('?')) {
+                url = url.split('?')[0];
+              }
+              urls.push(url);
+            }
+          });
+          
+          return urls;
+        });
+        
+        if (attachmentUrls.length > 0) {
+          // Initialize thread map if needed
+          if (!attachmentsByThreadAndPin[threadName]) {
+            attachmentsByThreadAndPin[threadName] = {};
+          }
+          
+          attachmentsByThreadAndPin[threadName][pinNumber] = attachmentUrls;
+          
+          console.log(`         ✅ Found ${attachmentUrls.length} attachment(s)`);
+          attachmentUrls.forEach(url => console.log(`            - ${url}`));
+        } else {
+          console.log(`         ℹ️  No attachment images found`);
+        }
+        
+        // Close the sidebar/modal - press Escape to go back
+        console.log(`         🔙 Closing attachment view...`);
+        await page.keyboard.press('Escape');
+        await new Promise(resolve => setTimeout(resolve, 800));
+        
+        // We might need to refresh the element references after closing
+        // Re-get the thread groups in case DOM changed
+        threadGroups = await page.$$('div.thread-list-group');
+      }
+    }
+    
+    const totalThreads = Object.keys(attachmentsByThreadAndPin).length;
+    const totalPins = Object.values(attachmentsByThreadAndPin).reduce((sum, thread) => sum + Object.keys(thread).length, 0);
+    console.log(`\n   📊 Collected attachments from ${totalPins} comment(s) across ${totalThreads} thread(s)\n`);
+    
+  } catch (error) {
+    console.error('   ❌ Error collecting attachments:', error.message);
+  }
+  
+  return attachmentsByThreadAndPin;
+}
+
 async function extractThreadDataFromPage(page) {
   console.log('⏳ Waiting for thread list to load...');
   await page.waitForSelector('div.thread-list', { timeout: 30000 });
@@ -32,93 +154,94 @@ async function extractThreadDataFromPage(page) {
   await new Promise(resolve => setTimeout(resolve, 2000));
   await expandAllThreadGroupsFromPage(page);
 
-  const threads = await page.evaluate(() => {
-    const threadsByName = {};
-    const threadList = document.querySelector('div.thread-list');
-    if (!threadList) return threadsByName;
-    
-    let threadGroups = threadList.querySelectorAll(':scope > div.thread-list-group');
-    if (threadGroups.length === 0) {
-      threadGroups = document.querySelectorAll('div.thread-list-group');
-    }
-    
-    threadGroups.forEach((group, groupIndex) => {
-      try {
-        const nameElement = group.querySelector('span.thread-list-item-group-header-label');
-        const threadName = nameElement ? nameElement.textContent.trim() : `Thread ${groupIndex + 1}`;
-        
-        if (!threadName) return;
-        if (!threadsByName[threadName]) threadsByName[threadName] = [];
+  // Collect attachments first by navigating through image sidebar
+  const attachmentsByThread = await collectAttachmentsFromAllThreads(page);
 
-        const messageElements = group.querySelectorAll('div[data-thread-id]');
-        let threadIndex = 1;
-        
-        Array.from(messageElements).forEach((messageEl, msgIndex) => {
-          try {
-            const threadId = messageEl.getAttribute('data-thread-id') || 
-                           messageEl.getAttribute('data-message-id') || 
-                           `${threadName}-${msgIndex + 1}`;
-            
-            let pinNumber = null;
-            const pinSelectors = ['.thread-label', '.pin-label', '.label-button', '.pin-number'];
-            for (const selector of pinSelectors) {
-              const pinElement = messageEl.querySelector(selector);
-              if (pinElement) {
-                const pinText = pinElement.textContent.trim();
-                const extractedPin = parseInt(pinText.match(/\d+/)?.[0]);
-                if (extractedPin && !isNaN(extractedPin)) {
-                  pinNumber = extractedPin;
-                  break;
-                }
-              }
-            }
-            
-            let messageContent = '';
-            const contentSelectors = ['div.message-text p', '.message-content', '.comment-text', 'p'];
-            for (const selector of contentSelectors) {
-              const contentElement = messageEl.querySelector(selector);
-              if (contentElement && contentElement.textContent.trim()) {
-                messageContent = contentElement.textContent.trim();
-                break;
-              }
-            }
-            
-            let userName = '';
-            const authorSelectors = ['span.message-author', '.author-name', '.user-name'];
-            for (const selector of authorSelectors) {
-              const authorElement = messageEl.querySelector(selector);
-              if (authorElement && authorElement.textContent.trim()) {
-                userName = authorElement.textContent.trim() || authorElement.getAttribute('title') || '';
-                if (userName) break;
-              }
-            }
+  // Puppeteer-based extraction for comments
+  const threadsByName = {};
+  const threadListHandle = await page.$('div.thread-list');
+  if (!threadListHandle) return { projectName: projectName || "Unknown Project", threads: [] };
 
-            if (threadId || messageContent || userName) {
-              threadsByName[threadName].push({
-                id: threadId,
-                index: pinNumber || threadIndex,
-                pinNumber: pinNumber || threadIndex,
-                content: messageContent,
-                user: userName
-              });
-              threadIndex++;
-            }
-          } catch (msgError) {
-            console.warn('Error processing message:', msgError);
+  let threadGroups = await page.$$('div.thread-list-group');
+  if (threadGroups.length === 0) {
+    threadGroups = await page.$$('div.thread-list > div.thread-list-group');
+  }
+
+  for (let groupIndex = 0; groupIndex < threadGroups.length; groupIndex++) {
+    const group = threadGroups[groupIndex];
+    const nameElement = await group.$('span.thread-list-item-group-header-label');
+    let threadName = nameElement ? (await page.evaluate(el => el.textContent.trim(), nameElement)) : `Thread ${groupIndex + 1}`;
+    if (!threadName) continue;
+    if (!threadsByName[threadName]) threadsByName[threadName] = [];
+
+    const messageElements = await group.$$('div[data-thread-id]');
+    let threadIndex = 1;
+    for (let msgIndex = 0; msgIndex < messageElements.length; msgIndex++) {
+      const messageEl = messageElements[msgIndex];
+      // ... Pin number extraction ...
+      let pinNumber = null;
+      const pinSelectors = ['.thread-label', '.pin-label', '.label-button', '.pin-number'];
+      for (const selector of pinSelectors) {
+        const pinElement = await messageEl.$(selector);
+        if (pinElement) {
+          const pinText = await page.evaluate(el => el.textContent.trim(), pinElement);
+          const extractedPin = parseInt(pinText.match(/\d+/)?.[0]);
+          if (extractedPin && !isNaN(extractedPin)) {
+            pinNumber = extractedPin;
+            break;
           }
-        });
-      } catch (groupError) {
-        console.warn('Error processing thread group:', groupError);
+        }
       }
-    });
-    return threadsByName;
-  });
-
+      // ... Content extraction ...
+      let messageContent = '';
+      const contentSelectors = ['div.message-text p', '.message-content', '.comment-text', 'p'];
+      for (const selector of contentSelectors) {
+        const contentElement = await messageEl.$(selector);
+        if (contentElement) {
+          messageContent = await page.evaluate(el => el.textContent.trim(), contentElement);
+          break;
+        }
+      }
+      // ... User extraction ...
+      let userName = '';
+      const authorSelectors = ['span.message-author', '.author-name', '.user-name'];
+      for (const selector of authorSelectors) {
+        const authorElement = await messageEl.$(selector);
+        if (authorElement) {
+          userName = await page.evaluate(el => el.textContent.trim(), authorElement);
+          if (!userName) userName = await page.evaluate(el => el.getAttribute('title') || '', authorElement);
+          if (userName) break;
+        }
+      }
+      // Get attachments from the pre-collected map by matching thread name and pin number
+      let attachmentUrls = [];
+      if (attachmentsByThread[threadName] && attachmentsByThread[threadName][pinNumber || 1]) {
+        attachmentUrls = attachmentsByThread[threadName][pinNumber || 1];
+      }
+      // Append attachment URLs to the comment content if any exist
+      let finalContent = messageContent;
+      if (attachmentUrls.length > 0) {
+        finalContent = messageContent + '\n\n📎 Attachments:\n' + attachmentUrls.map(url => `- ${url}`).join('\n');
+      }
+      const threadId = await page.evaluate(el => el.getAttribute('data-thread-id') || el.getAttribute('data-message-id') || `${threadName}-${msgIndex + 1}`, messageEl);
+      if (threadId || finalContent || userName) {
+        threadsByName[threadName].push({
+          id: threadId,
+          index: pinNumber || threadIndex,
+          pinNumber: pinNumber || threadIndex,
+          content: finalContent,
+          user: userName,
+          attachments: attachmentUrls  // Add attachments as separate field for database
+        });
+        threadIndex++;
+      }
+    }
+  }
   return {
     projectName: projectName || "Unknown Project",
-    threads: Object.keys(threads).map(threadName => ({
+    threads: Object.keys(threadsByName).map(threadName => ({
       threadName: threadName,
-      comments: threads[threadName]
+      comments: threadsByName[threadName]
     }))
   };
 }

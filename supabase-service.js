@@ -386,7 +386,8 @@ class SupabaseService {
               index: comment.index || comment.pinNumber || 0,
               pinNumber: comment.pinNumber || comment.index || 0,
               content: comment.content || '',
-              user: comment.user || 'Unknown'
+              user: comment.user || 'Unknown',
+              attachments: comment.attachments || []
             }))
           }))
         }
@@ -460,6 +461,27 @@ class SupabaseService {
         return null;
       }
 
+      // Format threads with attachment info
+      const threads = (project.markup_threads || []).map(thread => ({
+        threadName: thread.thread_name,
+        imageIndex: thread.image_index,
+        imagePath: thread.image_path,
+        imageFilename: thread.image_filename,
+        localImagePath: thread.local_image_path,
+        hasAttachments: thread.has_attachments || false,
+        comments: (thread.markup_comments || []).map(comment => ({
+          id: comment.id,
+          index: comment.comment_index,
+          pinNumber: comment.pin_number,
+          content: comment.content,
+          user: comment.user_name,
+          attachments: comment.attachments || []
+        }))
+      }));
+      
+      // Check if ANY thread has attachments
+      const hasAttachments = threads.some(thread => thread.hasAttachments);
+
       // Format response
       return {
         success: true,
@@ -468,20 +490,8 @@ class SupabaseService {
         totalThreads: project.total_threads,
         totalScreenshots: project.total_screenshots,
         timestamp: project.extraction_timestamp,
-        threads: (project.markup_threads || []).map(thread => ({
-          threadName: thread.thread_name,
-          imageIndex: thread.image_index,
-          imagePath: thread.image_path,
-          imageFilename: thread.image_filename,
-          localImagePath: thread.local_image_path,
-          comments: (thread.markup_comments || []).map(comment => ({
-            id: comment.id,
-            index: comment.comment_index,
-            pinNumber: comment.pin_number,
-            content: comment.content,
-            user: comment.user_name
-          }))
-        }))
+        hasAttachments: hasAttachments,
+        threads: threads
       };
 
     } catch (error) {
