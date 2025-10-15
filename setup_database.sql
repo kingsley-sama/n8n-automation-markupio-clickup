@@ -65,7 +65,6 @@ CREATE TABLE IF NOT EXISTS markup_threads (
     image_index INTEGER,
     image_path TEXT,
     image_filename VARCHAR(255),
-    local_image_path TEXT,
     created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
     updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
 );
@@ -217,7 +216,7 @@ BEGIN
             image_index,
             image_path,
             image_filename,
-            local_image_path
+            has_attachments
         )
         VALUES (
             v_project_id,
@@ -225,7 +224,7 @@ BEGIN
             (v_thread->>'imageIndex')::INTEGER,
             v_thread->>'imagePath',
             v_thread->>'imageFilename',
-            v_thread->>'localImagePath'
+            FALSE
         )
         RETURNING id INTO v_thread_id;
 

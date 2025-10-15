@@ -22,7 +22,6 @@ async function getProjectByPartialName(partialName) {
       imageIndex: thread.image_index,
       imagePath: thread.image_path,
       imageFilename: thread.image_filename,
-      localImagePath: thread.local_image_path,
       hasAttachments: thread.has_attachments || false,
       comments: (thread.markup_comments || []).map(comment => ({
         id: comment.id,
@@ -135,7 +134,6 @@ async function getProjectById(projectId) {
       imageIndex: thread.image_index,
       imagePath: thread.image_path,
       imageFilename: thread.image_filename,
-      localImagePath: thread.local_image_path,
       hasAttachments: thread.has_attachments || false,
       comments: (thread.markup_comments || []).map(comment => ({
         id: comment.id,

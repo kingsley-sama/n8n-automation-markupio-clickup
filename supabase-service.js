@@ -288,8 +288,7 @@ class SupabaseService {
           
           threadsWithUrls.push({
             ...thread,
-            imagePath: uploadedUrl,
-            localImagePath: uploadedUrl
+            imagePath: uploadedUrl
           });
         }
       }
@@ -380,7 +379,6 @@ class SupabaseService {
             imageIndex: threadIdx + 1,
             imagePath: thread.imagePath,
             imageFilename: thread.imageFilename || `thread_${threadIdx + 1}.jpg`,
-            localImagePath: thread.localImagePath,
             comments: (thread.comments || []).map(comment => ({
               id: comment.id || this.generateUUID(),
               index: comment.index || comment.pinNumber || 0,
@@ -467,7 +465,6 @@ class SupabaseService {
         imageIndex: thread.image_index,
         imagePath: thread.image_path,
         imageFilename: thread.image_filename,
-        localImagePath: thread.local_image_path,
         hasAttachments: thread.has_attachments || false,
         comments: (thread.markup_comments || []).map(comment => ({
           id: comment.id,

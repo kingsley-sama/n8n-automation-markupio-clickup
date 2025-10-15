@@ -20,6 +20,52 @@ psql -h <your-host> -U <your-user> -d <your-database> -f migrations/001_add_atta
 
 ## Migration History
 
+### 003_remove_local_image_path.sql (October 15, 2025)
+
+**Purpose:** Remove redundant `local_image_path` column from `markup_threads` table
+
+**Changes:**
+- ✅ Drops `local_image_path` (TEXT) column from `markup_threads` table
+- ✅ Updates `insert_markup_payload()` function to not use `local_image_path`
+- ✅ **Safe for existing data** - Column stores duplicate of `image_path`
+- ✅ **Storage optimization** - Eliminates duplicate image path storage
+
+**Why Remove It:**
+- `local_image_path` and `image_path` store the exact same URL
+- Redundant data that wastes database storage
+- Only `image_path` is needed to reference screenshots
+- No application code distinguishes between the two fields
+
+**What Gets Removed:**
+```sql
+-- This duplicate column is removed
+local_image_path TEXT
+```
+
+**Before:**
+```json
+{
+  "image_path": "https://supabase.co/storage/.../screenshot.jpg",
+  "local_image_path": "https://supabase.co/storage/.../screenshot.jpg"  // Same value!
+}
+```
+
+**After:**
+```json
+{
+  "image_path": "https://supabase.co/storage/.../screenshot.jpg"  // Single source of truth
+}
+```
+
+**Rollback (if needed):**
+```sql
+-- Add column back and populate with image_path values
+ALTER TABLE markup_threads ADD COLUMN local_image_path TEXT;
+UPDATE markup_threads SET local_image_path = image_path;
+```
+
+---
+
 ### 002_remove_raw_payload.sql (October 15, 2025)
 
 **Purpose:** Remove redundant `raw_payload` column from `markup_projects` table

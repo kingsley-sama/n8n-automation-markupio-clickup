@@ -84,7 +84,6 @@ BEGIN
             image_index,
             image_path,
             image_filename,
-            local_image_path,
             has_attachments
         )
         VALUES (
@@ -93,7 +92,6 @@ BEGIN
             (v_thread->>'imageIndex')::INTEGER,
             v_thread->>'imagePath',
             v_thread->>'imageFilename',
-            v_thread->>'localImagePath',
             v_has_attachments
         )
         RETURNING id INTO v_thread_id;
