@@ -1,15 +1,17 @@
 # Markup.io ClickUp Automation
 
-A comprehensive automation system for capturing screenshots and extracting thread data from Markup.io projects with intelligent URL-based deduplication and automatic image replacement.
+A comprehensive automation system for capturing screenshots and extracting thread data from Markup.io projects with intelligent URL-based deduplication, automatic image replacement, and smart screenshot matching.
 
 ## 🌟 Key Features
 
-- **Smart URL Checking**: Automatically detects existing records for the same URL
-- **Image Replacement**: Replaces old screenshots with new ones instead of creating duplicates
-- **Supabase Integration**: Stores data and images with intelligent update/create logic
-- **Single Browser Session**: Optimized extraction using one browser for both operations
-- **REST API Server**: HTTP endpoints for easy integration
-- **ClickUp Ready**: Structured data output perfect for ClickUp automation workflows
+- **🎯 Smart Screenshot Matching**: Automatically matches images with threads by filename, skipping images without comments
+- **🔍 Smart URL Checking**: Automatically detects existing records for the same URL
+- **🔄 Image Replacement**: Replaces old screenshots with new ones instead of creating duplicates
+- **💾 Supabase Integration**: Stores data and images with intelligent update/create logic
+- **⚡ Single Browser Session**: Optimized extraction using one browser for both operations
+- **🌐 REST API Server**: HTTP endpoints for easy integration
+- **📊 Comprehensive Error Logging**: All errors logged to database for monitoring and debugging
+- **✅ ClickUp Ready**: Structured data output perfect for ClickUp automation workflows
 
 ## 🚀 Quick Start
 
@@ -121,6 +123,38 @@ if (result.success) {
 }
 ```
 
+## 🎯 Smart Screenshot Matching
+
+### How It Works
+The system intelligently matches images with their corresponding threads by filename:
+
+1. **Thread Name Extraction**: Extracts thread names like `"01. 1234-56a TEST Folder.jpg"`
+2. **Image Name Detection**: Reads image names from fullscreen view (e.g., `"1234-56a TEST Folder.jpg"`)
+3. **Smart Matching**: Removes leading numbers from thread names and matches with image names
+4. **Intelligent Navigation**: Clicks "next" button and checks each image, skipping non-matching ones
+5. **Complete Coverage**: Ensures every thread gets its corresponding screenshot
+
+### Example Scenario
+```
+Images available: [image1.jpg, image2.jpg, image3.jpg, image4.jpg]
+Threads with comments: [01. image1.jpg, 03. image3.jpg]
+
+Traditional approach (WRONG):
+  ❌ Would capture image1.jpg and image2.jpg
+
+Smart matching approach (CORRECT):
+  ✅ Captures image1.jpg (matches thread "01. image1.jpg")
+  ⏭️  Skips image2.jpg (no matching thread)
+  ✅ Captures image3.jpg (matches thread "03. image3.jpg")
+  ⏭️  Skips image4.jpg (no matching thread)
+```
+
+### Benefits
+- ✅ **Accurate**: Only captures images that have threads/comments
+- ✅ **Efficient**: Automatically skips irrelevant images
+- ✅ **Flexible**: Works regardless of image order
+- ✅ **Robust**: Handles missing images gracefully
+
 ## 🔄 URL Checking & Image Replacement Logic
 
 ### How It Works
@@ -138,6 +172,45 @@ if (result.success) {
 - **Storage Efficiency**: Old images are automatically cleaned up
 - **Data Freshness**: Latest screenshots always replace older versions
 - **Cost Optimization**: Prevents Supabase storage bloat
+- **Smart Matching**: Only relevant images are captured and stored
+
+## 📊 Error Logging & Monitoring
+
+### Comprehensive Error Tracking
+All errors during execution are logged to the `scraping_error_logs` table with:
+- Full error messages and stack traces
+- Operation context (what was happening when it failed)
+- Progress information (matched/expected counts)
+- Thread names and image details
+- Session IDs for tracking
+
+### Error Categories
+- **Image Name Extraction Errors**: When image name can't be read from fullscreen
+- **Navigation Errors**: When clicking "next" button fails
+- **Incomplete Matching**: When not all threads can be matched with images
+- **Thread Extraction Errors**: When thread data can't be extracted
+- **Database Errors**: When saving to Supabase fails
+
+### Monitoring Queries
+```sql
+-- Get all incomplete matches
+SELECT * FROM scraping_error_logs 
+WHERE error_details->>'operation' = 'captureImagesMatchingThreads - incomplete'
+ORDER BY failed_at DESC;
+
+-- Get errors by URL
+SELECT * FROM scraping_error_logs 
+WHERE url = 'your-markup-url'
+ORDER BY failed_at DESC;
+
+-- Error rate by day
+SELECT DATE(failed_at), COUNT(*) 
+FROM scraping_error_logs
+WHERE failed_at > NOW() - INTERVAL '7 days'
+GROUP BY DATE(failed_at);
+```
+
+See [ERROR_LOGGING.md](./ERROR_LOGGING.md) for complete documentation.
 
 ## 📊 Database Schema
 
@@ -162,12 +235,23 @@ if (result.success) {
 - id (Primary Key)
 - session_id (UUID)
 - url (Text)
+- title (Text)
 - error_message (Text)
-- error_details (JSONB)
+- number_of_images (Integer)
+- error_details (JSONB) - Detailed context including operation, progress, thread names
+- options (JSONB)
 - failed_at (Timestamp)
-- retry_count (Integer)
 - status (Text: 'failed', 'retrying', 'resolved')
 ```
+
+### Normalized Schema Tables
+```sql
+- markup_projects: Project-level information
+- markup_threads: Individual threads with image references
+- markup_comments: Comments within threads
+```
+
+See [DATABASE_SETUP.md](./DATABASE_SETUP.md) for complete schema.
 
 ## 🛠 API Endpoints
 
@@ -185,6 +269,7 @@ if (result.success) {
 ```javascript
 const options = {
   numberOfImages: 'auto',        // Auto-detects from thread count
+  threadNames: null,             // Optional: Array of thread names for smart matching
   screenshotQuality: 90,         // JPEG quality (1-100)
   timeout: 90000,                // Request timeout in ms
   retryAttempts: 3,              // Number of retry attempts
@@ -192,6 +277,21 @@ const options = {
   waitForFullscreen: true,       // Try to activate fullscreen mode
   screenshotFormat: 'jpeg'       // Image format
 };
+```
+
+### Smart Matching Options
+When using `getCompletePayload()`, thread names are automatically extracted and used for smart matching. You can also manually provide thread names:
+
+```javascript
+const screenshotter = new MarkupScreenshotter({
+  numberOfImages: 5,
+  threadNames: [
+    "01. hero-section.jpg",
+    "03. features-grid.jpg",
+    "05. cta-banner.jpg"
+  ],
+  screenshotQuality: 90
+});
 ```
 
 ## 🧪 Testing
@@ -247,42 +347,78 @@ const failed = await supabaseService.getFailedScrapings(10);
 console.log(failed);
 ```
 
+### Check Incomplete Matches
+```sql
+-- See which threads couldn't be matched
+SELECT 
+  error_message,
+  error_details->>'unmatchedThreads' as unmatched,
+  error_details->>'matchedCount' as matched,
+  error_details->>'expectedCount' as expected,
+  failed_at
+FROM scraping_error_logs 
+WHERE error_details->>'operation' = 'captureImagesMatchingThreads - incomplete'
+ORDER BY failed_at DESC;
+```
+
 ### Debug Mode
-Set `SCRAPER_DEBUG_MODE=true` or use `debugMode: true` in options for detailed logs.
+Set `SCRAPER_DEBUG_MODE=true` or use `debugMode: true` in options for detailed logs including:
+- Image name extraction attempts
+- Thread matching details
+- Navigation button searches
+- Screenshot capture progress
 
 ## 🚦 Error Handling
 
 - **Automatic Retries**: Failed operations retry with exponential backoff
 - **Graceful Degradation**: Screenshot failures don't break thread extraction
-- **Error Logging**: All errors logged to Supabase for analysis
-- **Recovery Options**: Failed operations can be manually retriggered
+- **Comprehensive Logging**: All errors logged to Supabase with full context
+- **Smart Matching Fallback**: Falls back to sequential capture if thread names unavailable
+- **Incomplete Match Warnings**: Logs when not all threads can be matched
+- **Recovery Options**: Failed operations can be manually retriggered with logged context
 
 ## 📁 File Structure
 
 ```
-├── server.js              # REST API server
-├── script_integrated.js   # Screenshot capture logic
-├── getpayload.js         # Thread extraction + screenshot combination
-├── supabase-service.js   # Database operations with URL checking
-├── supabase_schema.sql   # Database schema
-├── test_url_checking.js  # Test script for URL checking
-├── package.json          # Dependencies and scripts
-└── README.md            # This file
+├── server.js                      # REST API server
+├── db_helper.js                   # Screenshot capture with smart matching
+├── getpayload.js                  # Thread extraction + screenshot combination
+├── supabase-service.js            # Database operations with URL checking
+├── db_response_helper.js          # Database response utilities
+├── supabase_schema.sql            # Database schema
+├── setup_database.sql             # Complete database setup
+├── test_url_checking.js           # Test script for URL checking
+├── package.json                   # Dependencies and scripts
+├── README.md                      # This file
+├── DATABASE_SETUP.md              # Database setup guide
+├── SMART_SCREENSHOT_MATCHING.md   # Smart matching documentation
+├── ERROR_LOGGING.md               # Error logging documentation
+└── ERROR_LOGGING_SUMMARY.md       # Error logging quick reference
 ```
 
 ## 🔄 Workflow Examples
 
 ### New Project Workflow
-1. Extract markup → **Creates new record**
+1. Extract markup → **Creates new record with smart matching**
 2. Re-extract same markup → **Updates existing record, replaces images**
-3. No duplicate records, storage stays clean
+3. **Smart matching** ensures only images with threads are captured
+4. No duplicate records, storage stays clean
+
+### Smart Matching Workflow
+1. Thread extraction identifies 5 threads from images: 1, 2, 4, 6, 8
+2. Smart matching navigates through all images in fullscreen
+3. Captures only images that match thread names (skips 3, 5, 7, 9, 10)
+4. Each thread gets its correct corresponding screenshot
+5. Incomplete matches logged for monitoring
 
 ### Production Integration
 1. Webhook receives markup URL
 2. API call to `/complete-payload`
-3. Response indicates if record was created or updated
-4. ClickUp tasks created/updated accordingly
-5. Old screenshots automatically cleaned up
+3. Smart matching automatically used for screenshot capture
+4. Response indicates if record was created or updated
+5. ClickUp tasks created/updated accordingly
+6. Old screenshots automatically cleaned up
+7. Error logs available for monitoring
 
 ## 🛡 Security & Best Practices
 
@@ -296,10 +432,20 @@ Set `SCRAPER_DEBUG_MODE=true` or use `debugMode: true` in options for detailed l
 ## 📈 Performance Optimizations
 
 - **Single Browser Session**: Complete payload extraction uses one browser instance
+- **Smart Navigation**: Only navigates to and captures relevant images
 - **Parallel Processing**: Screenshots captured in parallel when possible
 - **Smart Caching**: URL checking prevents unnecessary duplicate processing
-- **Image Cleanup**: Automatic deletion of old images prevents storage bloat
+- **Automatic Cleanup**: Old images deleted to prevent storage bloat
 - **Connection Pooling**: Efficient Supabase connections
+- **Intelligent Matching**: Skips non-relevant images automatically
+
+## 📚 Additional Documentation
+
+- **[SMART_SCREENSHOT_MATCHING.md](./SMART_SCREENSHOT_MATCHING.md)**: Complete guide to smart matching feature
+- **[ERROR_LOGGING.md](./ERROR_LOGGING.md)**: Comprehensive error logging documentation
+- **[ERROR_LOGGING_SUMMARY.md](./ERROR_LOGGING_SUMMARY.md)**: Quick reference for error logging
+- **[DATABASE_SETUP.md](./DATABASE_SETUP.md)**: Database schema and setup guide
+- **[QUICKSTART.md](./QUICKSTART.md)**: Quick start guide for new users
 
 ## 🤝 Contributing
 
@@ -315,7 +461,10 @@ ISC License - see package.json for details.
 ## 🆘 Support
 
 For issues related to:
+- **Smart Matching**: Check [SMART_SCREENSHOT_MATCHING.md](./SMART_SCREENSHOT_MATCHING.md) and error logs
+- **Error Logging**: See [ERROR_LOGGING.md](./ERROR_LOGGING.md) for monitoring queries
 - **URL Checking**: Run `npm run test` to verify functionality
 - **Database Issues**: Check Supabase logs and connection settings
-- **Screenshot Problems**: Enable debug mode and check logs
+- **Screenshot Problems**: Enable debug mode and check detailed logs
 - **API Integration**: Check server logs and endpoint documentation
+- **Incomplete Matches**: Query `scraping_error_logs` table for details

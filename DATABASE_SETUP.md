@@ -1,12 +1,22 @@
 # Database Setup Guide
 
-## Problem
-You're getting this error:
+## Overview
+
+This guide helps you set up the complete database schema including tables for screenshot storage, thread data, error logging, and smart matching functionality.
+
+## Problem Scenarios
+
+### Error: Function not found
 ```
 Failed to insert normalized data: Could not find the function public.insert_markup_payload
 ```
+**Solution**: Run the complete `setup_database.sql` script
 
-This means the database tables and functions haven't been created yet.
+### Error: Table does not exist
+```
+relation "markup_threads" does not exist
+```
+**Solution**: Create all tables using the setup script
 
 ## Solution
 
@@ -83,9 +93,27 @@ Expected output:
 
 - **`scraped_data`**: Stores basic scraping session info (URL, timestamp, screenshots paths)
 - **`markup_projects`**: Stores project-level information (project name, URL, total threads)
-- **`markup_threads`**: Stores individual threads (comments grouped by location)
+- **`markup_threads`**: Stores individual threads (comments grouped by location) with image paths
 - **`markup_comments`**: Stores individual comments (user, content, pin number)
-- **`scraping_error_logs`**: Stores failed scraping attempts for retry
+- **`scraping_error_logs`**: Stores all errors with detailed context for monitoring
+  - Image name extraction failures
+  - Navigation errors during smart matching
+  - Incomplete thread matches
+  - Fatal errors with stack traces
+  - Operation context (what was happening when error occurred)
+
+## Error Logging Details
+
+The `scraping_error_logs` table includes:
+- **error_message**: Human-readable error description
+- **error_details**: JSONB field containing:
+  - `operation`: Which operation failed (e.g., "captureImagesMatchingThreads")
+  - `matchedCount` / `expectedCount`: Progress information
+  - `unmatchedThreads`: List of threads that couldn't be matched
+  - `stack`: Full error stack trace
+  - Additional context specific to the error type
+
+See [ERROR_LOGGING.md](./ERROR_LOGGING.md) for complete error logging documentation.
 
 ## Troubleshooting
 
@@ -99,6 +127,72 @@ This is fine! The script uses `CREATE OR REPLACE FUNCTION` to update the functio
 Make sure:
 1. Your `.env` file has correct `SUPABASE_URL` and `SUPABASE_SERVICE_KEY`
 2. Your Supabase project is active and accessible
+
+## Features Enabled by Database Schema
+
+### Smart Screenshot Matching
+- Threads table stores image paths for matched screenshots
+- Error logs track incomplete matches for monitoring
+- Projects table maintains thread counts for validation
+
+### URL-Based Deduplication
+- Unique constraints prevent duplicate URLs
+- Updated_at timestamps track record modifications
+- Old image cleanup handled automatically
+
+### Comprehensive Error Tracking
+- All errors logged with full context
+- Query errors by operation type, URL, or session
+- Monitor incomplete matches and failure patterns
+
+## Useful Queries
+
+### Monitor Smart Matching Success
+```sql
+-- Check for incomplete matches
+SELECT 
+  url,
+  error_details->>'matchedCount' as matched,
+  error_details->>'expectedCount' as expected,
+  error_details->>'unmatchedThreads' as unmatched,
+  failed_at
+FROM scraping_error_logs 
+WHERE error_details->>'operation' = 'captureImagesMatchingThreads - incomplete'
+ORDER BY failed_at DESC;
+```
+
+### View Project Statistics
+```sql
+SELECT 
+  p.project_name,
+  p.total_threads,
+  COUNT(DISTINCT t.id) as threads_with_screenshots,
+  COUNT(c.id) as total_comments
+FROM markup_projects p
+LEFT JOIN markup_threads t ON p.id = t.project_id
+LEFT JOIN markup_comments c ON t.id = c.thread_id
+GROUP BY p.id, p.project_name, p.total_threads
+ORDER BY p.created_at DESC;
+```
+
+### Check Error Rates
+```sql
+SELECT 
+  DATE(failed_at) as error_date,
+  COUNT(*) as error_count,
+  COUNT(DISTINCT url) as affected_urls
+FROM scraping_error_logs
+WHERE failed_at > NOW() - INTERVAL '7 days'
+GROUP BY DATE(failed_at)
+ORDER BY error_date DESC;
+```
+
+## Additional Resources
+
+- **[README.md](./README.md)**: Complete system documentation
+- **[SMART_SCREENSHOT_MATCHING.md](./SMART_SCREENSHOT_MATCHING.md)**: Smart matching details
+- **[ERROR_LOGGING.md](./ERROR_LOGGING.md)**: Error monitoring guide
+- **[QUICKSTART.md](./QUICKSTART.md)**: Quick setup guide
 3. Your IP is allowed in Supabase settings (if using connection pooler)
 
 ### Still having issues?

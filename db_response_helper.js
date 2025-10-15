@@ -12,10 +12,30 @@ async function getProjectByPartialName(partialName) {
       .from('markup_projects')
       .select(`*, scraped_data!inner(url, scraping_timestamp), markup_threads ( *, markup_comments(*) )`)
       .ilike('project_name', `%${partialName}%`)
-      .order('created_at', { ascending: false })
+      .order('updated_at', { ascending: false })
       .limit(1)
       .single();
     if (error || !project) return null;
+    
+    const threads = (project.markup_threads || []).map(thread => ({
+      threadName: thread.thread_name,
+      imageIndex: thread.image_index,
+      imagePath: thread.image_path,
+      imageFilename: thread.image_filename,
+      hasAttachments: thread.has_attachments || false,
+      comments: (thread.markup_comments || []).map(comment => ({
+        id: comment.id,
+        index: comment.comment_index,
+        pinNumber: comment.pin_number,
+        content: comment.content,
+        user: comment.user_name,
+        attachments: comment.attachments || []
+      }))
+    }));
+    
+    // Check if ANY thread has attachments
+    const hasAttachments = threads.some(thread => thread.hasAttachments);
+    
     return {
       id: project.id,
       projectName: project.project_name,
@@ -23,20 +43,8 @@ async function getProjectByPartialName(partialName) {
       totalThreads: project.total_threads,
       totalScreenshots: project.total_screenshots,
       timestamp: project.extraction_timestamp,
-      threads: (project.markup_threads || []).map(thread => ({
-        threadName: thread.thread_name,
-        imageIndex: thread.image_index,
-        imagePath: thread.image_path,
-        imageFilename: thread.image_filename,
-        localImagePath: thread.local_image_path,
-        comments: (thread.markup_comments || []).map(comment => ({
-          id: comment.id,
-          index: comment.comment_index,
-          pinNumber: comment.pin_number,
-          content: comment.content,
-          user: comment.user_name
-        }))
-      }))
+      hasAttachments: hasAttachments,
+      threads: threads
     };
   } catch (error) {
     console.error('Error searching project by partial name:', error.message);
@@ -121,6 +129,25 @@ async function getProjectById(projectId) {
     
     if (error) throw error;
     
+    const threads = (project.markup_threads || []).map(thread => ({
+      threadName: thread.thread_name,
+      imageIndex: thread.image_index,
+      imagePath: thread.image_path,
+      imageFilename: thread.image_filename,
+      hasAttachments: thread.has_attachments || false,
+      comments: (thread.markup_comments || []).map(comment => ({
+        id: comment.id,
+        index: comment.comment_index,
+        pinNumber: comment.pin_number,
+        content: comment.content,
+        user: comment.user_name,
+        attachments: comment.attachments || []
+      }))
+    }));
+    
+    // Check if ANY thread has attachments
+    const hasAttachments = threads.some(thread => thread.hasAttachments);
+    
     return {
       success: true,
       url: project.scraped_data.url,
@@ -128,20 +155,8 @@ async function getProjectById(projectId) {
       totalThreads: project.total_threads,
       totalScreenshots: project.total_screenshots,
       timestamp: project.extraction_timestamp,
-      threads: (project.markup_threads || []).map(thread => ({
-        threadName: thread.thread_name,
-        imageIndex: thread.image_index,
-        imagePath: thread.image_path,
-        imageFilename: thread.image_filename,
-        localImagePath: thread.local_image_path,
-        comments: (thread.markup_comments || []).map(comment => ({
-          id: comment.id,
-          index: comment.comment_index,
-          pinNumber: comment.pin_number,
-          content: comment.content,
-          user: comment.user_name
-        }))
-      }))
+      hasAttachments: hasAttachments,
+      threads: threads
     };
   } catch (error) {
     console.error('Error fetching project by ID:', error.message);
@@ -178,6 +193,7 @@ async function searchThreadsByContent(searchTerm, limit = 20) {
       content: comment.content,
       user: comment.user_name,
       pinNumber: comment.pin_number,
+      attachments: comment.attachments || [],
       threadName: comment.markup_threads.thread_name,
       projectName: comment.markup_threads.markup_projects.project_name,
       url: comment.markup_threads.markup_projects.scraped_data.url
