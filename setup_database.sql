@@ -54,7 +54,6 @@ CREATE TABLE IF NOT EXISTS markup_projects (
     total_threads INTEGER DEFAULT 0,
     total_screenshots INTEGER DEFAULT 0,
     extraction_timestamp TIMESTAMP WITH TIME ZONE,
-    raw_payload JSONB,
     created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
     updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
 );
@@ -197,8 +196,7 @@ BEGIN
         markup_url,
         total_threads,
         total_screenshots,
-        extraction_timestamp,
-        raw_payload
+        extraction_timestamp
     )
     VALUES (
         p_scraped_data_id,
@@ -206,8 +204,7 @@ BEGIN
         p_payload->'data'->>'url',
         (p_payload->'data'->>'totalThreads')::INTEGER,
         (p_payload->'data'->>'totalScreenshots')::INTEGER,
-        (p_payload->'data'->>'timestamp')::TIMESTAMP WITH TIME ZONE,
-        p_payload
+        (p_payload->'data'->>'timestamp')::TIMESTAMP WITH TIME ZONE
     )
     RETURNING id INTO v_project_id;
 

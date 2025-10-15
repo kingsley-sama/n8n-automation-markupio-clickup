@@ -20,6 +20,38 @@ psql -h <your-host> -U <your-user> -d <your-database> -f migrations/001_add_atta
 
 ## Migration History
 
+### 002_remove_raw_payload.sql (October 15, 2025)
+
+**Purpose:** Remove redundant `raw_payload` column from `markup_projects` table
+
+**Changes:**
+- ✅ Drops `raw_payload` (JSONB) column from `markup_projects` table
+- ✅ Updates `insert_markup_payload()` function to not use `raw_payload`
+- ✅ **Safe for existing data** - Column can be dropped without affecting functionality
+- ✅ **Storage optimization** - Removes duplicate data storage
+
+**Why Remove It:**
+- All data is already normalized into separate tables (`markup_threads`, `markup_comments`)
+- The raw payload was redundant and wasting database storage
+- No application code uses this column
+- Can always reconstruct the full payload from normalized tables
+
+**What Gets Removed:**
+```sql
+-- This column is no longer needed
+raw_payload JSONB
+```
+
+**Rollback (if needed):**
+```sql
+-- Add column back (though not recommended)
+ALTER TABLE markup_projects ADD COLUMN raw_payload JSONB;
+
+-- Update function to include it again (see setup_database.sql for old version)
+```
+
+---
+
 ### 001_add_attachment_support.sql (October 15, 2025)
 
 **Purpose:** Add attachment support to the database schema

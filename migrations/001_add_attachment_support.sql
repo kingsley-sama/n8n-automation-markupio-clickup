@@ -129,15 +129,14 @@ BEGIN
         RAISE EXCEPTION 'p_payload cannot be NULL';
     END IF;
 
-    -- Insert project
+    -- Insert project (without raw_payload)
     INSERT INTO public.markup_projects (
         scraped_data_id,
         project_name,
         markup_url,
         total_threads,
         total_screenshots,
-        extraction_timestamp,
-        raw_payload
+        extraction_timestamp
     )
     VALUES (
         p_scraped_data_id,
@@ -145,8 +144,7 @@ BEGIN
         p_payload->'data'->>'url',
         (p_payload->'data'->>'totalThreads')::INTEGER,
         (p_payload->'data'->>'totalScreenshots')::INTEGER,
-        (p_payload->'data'->>'timestamp')::TIMESTAMP WITH TIME ZONE,
-        p_payload
+        (p_payload->'data'->>'timestamp')::TIMESTAMP WITH TIME ZONE
     )
     RETURNING id INTO v_project_id;
 

@@ -72,6 +72,7 @@ async function collectAttachmentsFromAllThreads(page) {
         // Extract attachment URLs
         const attachmentUrls = await page.evaluate(() => {
           const urls = [];
+          const seen = new Set(); // Track seen URLs to avoid duplicates
           const images = document.querySelectorAll('img.associated-file-content.attachment-thumbnail');
           
           images.forEach(img => {
@@ -81,7 +82,11 @@ async function collectAttachmentsFromAllThreads(page) {
               if (url.includes('?')) {
                 url = url.split('?')[0];
               }
-              urls.push(url);
+              // Only add if not already seen
+              if (!seen.has(url)) {
+                seen.add(url);
+                urls.push(url);
+              }
             }
           });
           
@@ -218,20 +223,16 @@ async function extractThreadDataFromPage(page) {
       if (attachmentsByThread[threadName] && attachmentsByThread[threadName][pinNumber || 1]) {
         attachmentUrls = attachmentsByThread[threadName][pinNumber || 1];
       }
-      // Append attachment URLs to the comment content if any exist
-      let finalContent = messageContent;
-      if (attachmentUrls.length > 0) {
-        finalContent = messageContent + '\n\n📎 Attachments:\n' + attachmentUrls.map(url => `- ${url}`).join('\n');
-      }
+      
       const threadId = await page.evaluate(el => el.getAttribute('data-thread-id') || el.getAttribute('data-message-id') || `${threadName}-${msgIndex + 1}`, messageEl);
-      if (threadId || finalContent || userName) {
+      if (threadId || messageContent || userName) {
         threadsByName[threadName].push({
           id: threadId,
           index: pinNumber || threadIndex,
           pinNumber: pinNumber || threadIndex,
-          content: finalContent,
+          content: messageContent,  // Store only the message content, not attachments
           user: userName,
-          attachments: attachmentUrls  // Add attachments as separate field for database
+          attachments: attachmentUrls  // Attachments stored separately in dedicated field
         });
         threadIndex++;
       }

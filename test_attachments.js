@@ -78,6 +78,7 @@ async function collectAttachmentsFromAllThreads(page) {
         // Extract attachment URLs
         const attachmentUrls = await page.evaluate(() => {
           const urls = [];
+          const seen = new Set(); // Track seen URLs to avoid duplicates
           const images = document.querySelectorAll('img.associated-file-content.attachment-thumbnail');
           
           images.forEach(img => {
@@ -87,7 +88,11 @@ async function collectAttachmentsFromAllThreads(page) {
               if (url.includes('?')) {
                 url = url.split('?')[0];
               }
-              urls.push(url);
+              // Only add if not already seen
+              if (!seen.has(url)) {
+                seen.add(url);
+                urls.push(url);
+              }
             }
           });
           
@@ -311,21 +316,14 @@ async function testAttachmentExtraction(url) {
           console.log(`      ℹ️  No attachments for this comment (pin ${pinNumber || 'N/A'})`);
         }
         
-        // Append attachment URLs to comment content
-        let finalContent = messageContent;
-        if (attachmentUrls.length > 0) {
-          console.log(`      📎 Appending ${attachmentUrls.length} attachments to content`);
-          finalContent = messageContent + '\n\n📎 Attachments:\n' + attachmentUrls.map(url => `- ${url}`).join('\n');
-        }
-        
         // Add to results
         threadsByName[threadName].push({
           id: threadId || `${threadName}-${msgIndex + 1}`,
           index: pinNumber || threadIndex,
           pinNumber: pinNumber || threadIndex,
-          content: finalContent,
+          content: messageContent,  // Store only the message content, not attachments
           user: userName,
-          attachments: attachmentUrls  // Add attachments as separate field for database
+          attachments: attachmentUrls  // Attachments stored separately in dedicated field
         });
         
         threadIndex++;
@@ -352,9 +350,8 @@ async function testAttachmentExtraction(url) {
       thread.comments.forEach((comment, cidx) => {
         console.log(`   ${cidx + 1}. [Pin ${comment.pinNumber}] ${comment.user}`);
         console.log(`      ${comment.content.substring(0, 100)}${comment.content.length > 100 ? '...' : ''}`);
-        if (comment.content.includes('📎 Attachments:')) {
-          const attachmentCount = comment.content.split('\n📎 Attachments:\n')[1]?.split('\n').length || 0;
-          console.log(`      🎉 HAS ${attachmentCount} ATTACHMENT(S)!`);
+        if (comment.attachments && comment.attachments.length > 0) {
+          console.log(`      🎉 HAS ${comment.attachments.length} ATTACHMENT(S)!`);
         }
       });
     });
