@@ -205,6 +205,8 @@ DECLARE
     v_thread_id UUID;
     v_thread JSONB;
     v_comment JSONB;
+    v_has_attachments BOOLEAN;
+    v_attachments TEXT[];
 BEGIN
     -- Insert project
     INSERT INTO markup_projects (
@@ -228,6 +230,18 @@ BEGIN
     -- Insert threads and comments
     FOR v_thread IN SELECT * FROM jsonb_array_elements(p_payload->'data'->'threads')
     LOOP
+        -- Check if thread has attachments
+        v_has_attachments := FALSE;
+        IF jsonb_typeof(v_thread->'comments') = 'array' THEN
+            SELECT EXISTS (
+                SELECT 1 
+                FROM jsonb_array_elements(v_thread->'comments') AS comment
+                WHERE jsonb_typeof(comment->'attachments') = 'array' 
+                AND jsonb_array_length(comment->'attachments') > 0
+            ) INTO v_has_attachments;
+        END IF;
+
+        -- Insert thread WITHOUT local_image_path (only image_path)
         INSERT INTO markup_threads (
             id,
             project_id,
@@ -244,20 +258,29 @@ BEGIN
             (v_thread->>'imageIndex')::INTEGER,
             v_thread->>'imagePath',
             v_thread->>'imageFilename',
-            FALSE
+            v_has_attachments
         )
         RETURNING id INTO v_thread_id;
 
         -- Insert comments for this thread
         FOR v_comment IN SELECT * FROM jsonb_array_elements(v_thread->'comments')
         LOOP
+            -- Extract attachments array if present
+            v_attachments := '{}';
+            IF jsonb_typeof(v_comment->'attachments') = 'array' THEN
+                SELECT ARRAY(
+                    SELECT jsonb_array_elements_text(v_comment->'attachments')
+                ) INTO v_attachments;
+            END IF;
+
             INSERT INTO markup_comments (
                 id,
                 thread_id,
                 comment_index,
                 pin_number,
                 content,
-                user_name
+                user_name,
+                attachments
             )
             VALUES (
                 (v_comment->>'id')::UUID,
@@ -265,7 +288,8 @@ BEGIN
                 (v_comment->>'index')::INTEGER,
                 (v_comment->>'pinNumber')::INTEGER,
                 v_comment->>'content',
-                v_comment->>'user'
+                v_comment->>'user',
+                v_attachments
             );
         END LOOP;
     END LOOP;
