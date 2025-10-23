@@ -487,13 +487,60 @@ async function getCompletePayload(url, options = {}) {
     
     console.log('💾 Saving to normalized database structure...');
     
-    const threadsWithScreenshots = threadData.threads.map((thread, index) => ({
-      ...thread,
-      imageIndex: index + 1,
-      imageFilename: `thread_${index + 1}.jpg`,
-      screenshotBuffer: screenshotResult.screenshotBuffers[index]?.buffer || null
-    }));
+
+    // Translate all comment contents asynchronously before saving
+    const { translateCommentToEnglish } = require('./translator.js');
+    let threadsWithScreenshots;
     
+    try {
+      console.log('🌐 Translating comments from German to English...');
+      
+      // Process threads sequentially to avoid rate limiting
+      threadsWithScreenshots = [];
+      for (let index = 0; index < threadData.threads.length; index++) {
+        const thread = threadData.threads[index];
+        
+        // Translate comments one at a time with small delay
+        const translatedComments = [];
+        for (const comment of (thread.comments || [])) {
+          const translatedContent = await translateCommentToEnglish(comment.content);
+          translatedComments.push({ ...comment, content: translatedContent });
+          
+          // Small delay between translations to avoid rate limiting (100ms)
+          if (translatedComments.length < thread.comments.length) {
+            await new Promise(resolve => setTimeout(resolve, 100));
+          }
+        }
+        
+        threadsWithScreenshots.push({
+          ...thread,
+          comments: translatedComments,
+          imageIndex: index + 1,
+          imageFilename: `thread_${index + 1}.jpg`,
+          screenshotBuffer: screenshotResult.screenshotBuffers[index]?.buffer || null
+        });
+      }
+      
+      console.log('✅ Translation completed successfully');
+      
+    } catch (error) {
+      const errorMsg = `Translation failed: ${error.message}`;
+      console.error(`❌ ${errorMsg}`);
+      
+      // Log translation error to database
+      await supabaseService.log('error', errorMsg, error, {
+        url: url,
+        operation: 'translateComments',
+        sessionId: sessionId,
+        totalComments: threadData.threads.reduce((sum, t) => sum + (t.comments?.length || 0), 0),
+        errorType: 'translation_failure',
+        stack: error.stack
+      });
+      
+      // Re-throw to stop the job and trigger retry
+      throw new Error(errorMsg);
+    }
+
     const payloadToSave = {
       success: true,
       url: url,
