@@ -188,3 +188,8 @@ WHERE id = 'your-thread-id';
 - Uses `IF NOT EXISTS` to avoid errors on re-runs
 - Existing data is **never modified** - only new columns added with safe defaults
 - Triggers handle automatic updates, no manual maintenance needed
+talk to noor about supabase
+finish testing on updating clickup table for task management
+also che
+
+- Give Longer context to the Pms on your automations
