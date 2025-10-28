@@ -491,54 +491,64 @@ async function getCompletePayload(url, options = {}) {
     // Translate all comment contents asynchronously before saving
     const { translateCommentToEnglish } = require('./translator.js');
     let threadsWithScreenshots;
-    
-    try {
-      console.log('🌐 Translating comments from German to English...');
-      
-      // Process threads sequentially to avoid rate limiting
-      threadsWithScreenshots = [];
-      for (let index = 0; index < threadData.threads.length; index++) {
-        const thread = threadData.threads[index];
-        
-        // Translate comments one at a time with small delay
-        const translatedComments = [];
-        for (const comment of (thread.comments || [])) {
+
+    console.log('🌐 Starting translation of comments (German → English)');
+    // Process threads sequentially to avoid rate limiting
+    threadsWithScreenshots = [];
+    const overallTranslationErrors = [];
+
+    for (let index = 0; index < threadData.threads.length; index++) {
+      const thread = threadData.threads[index];
+      console.log(`🔁 Translating thread ${index + 1}/${threadData.threads.length}: "${thread.threadName}" (${(thread.comments || []).length} comments)`);
+
+      // Translate comments one at a time with small delay, but tolerate individual failures
+      const translatedComments = [];
+      for (let cIndex = 0; cIndex < (thread.comments || []).length; cIndex++) {
+        const comment = thread.comments[cIndex];
+        try {
+          console.log(`   • Translating comment ${cIndex + 1}/${thread.comments.length}`);
           const translatedContent = await translateCommentToEnglish(comment.content);
           translatedComments.push({ ...comment, content: translatedContent });
-          
-          // Small delay between translations to avoid rate limiting (100ms)
-          if (translatedComments.length < thread.comments.length) {
-            await new Promise(resolve => setTimeout(resolve, 100));
-          }
+        } catch (err) {
+          // Log and fallback to original content for this comment
+          const warnMsg = `Translation error for thread "${thread.threadName}" comment ${cIndex + 1}: ${err.message}`;
+          console.warn(`⚠️  ${warnMsg}`);
+          overallTranslationErrors.push({ thread: thread.threadName, index: cIndex + 1, error: err.message });
+          translatedComments.push({ ...comment, content: comment.content });
         }
-        
-        threadsWithScreenshots.push({
-          ...thread,
-          comments: translatedComments,
-          imageIndex: index + 1,
-          imageFilename: `thread_${index + 1}.jpg`,
-          screenshotBuffer: screenshotResult.screenshotBuffers[index]?.buffer || null
-        });
+
+        // Small delay between translations to avoid rate limiting (100ms)
+        if (translatedComments.length < (thread.comments || []).length) {
+          await new Promise(resolve => setTimeout(resolve, 100));
+        }
       }
-      
-      console.log('✅ Translation completed successfully');
-      
-    } catch (error) {
-      const errorMsg = `Translation failed: ${error.message}`;
-      console.error(`❌ ${errorMsg}`);
-      
-      // Log translation error to database
-      await supabaseService.log('error', errorMsg, error, {
-        url: url,
-        operation: 'translateComments',
-        sessionId: sessionId,
-        totalComments: threadData.threads.reduce((sum, t) => sum + (t.comments?.length || 0), 0),
-        errorType: 'translation_failure',
-        stack: error.stack
+
+      threadsWithScreenshots.push({
+        ...thread,
+        comments: translatedComments,
+        imageIndex: index + 1,
+        imageFilename: `thread_${index + 1}.jpg`,
+        screenshotBuffer: screenshotResult.screenshotBuffers[index]?.buffer || null
       });
-      
-      // Re-throw to stop the job and trigger retry
-      throw new Error(errorMsg);
+    }
+
+    if (overallTranslationErrors.length > 0) {
+      const warningMsg = `Translation completed with ${overallTranslationErrors.length} errors (see logs)`;
+      console.warn(`⚠️  ${warningMsg}`);
+      // Log translation issues to Supabase as warnings (do not fail the job)
+      try {
+        await supabaseService.log('warn', warningMsg, { errors: overallTranslationErrors }, {
+          url: url,
+          operation: 'translateComments',
+          sessionId: sessionId,
+          totalComments: threadData.threads.reduce((sum, t) => sum + (t.comments?.length || 0), 0),
+          errorType: 'translation_partial_failure'
+        });
+      } catch (logErr) {
+        console.error('❌ Failed to log translation warnings to Supabase:', logErr.message);
+      }
+    } else {
+      console.log('✅ Translation completed successfully');
     }
 
     const payloadToSave = {

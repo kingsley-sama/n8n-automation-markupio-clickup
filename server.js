@@ -2,7 +2,7 @@
 const express = require('express');
 const { getCompletePayload } = require('./getpayload');
 const { getProjectByPartialName } = require('./db_response_helper.js');
-const { addScrapingJob, getJobStatus, getQueueStats } = require('./queue');
+const { addScrapingJob, getJobStatus, getQueueStats, getJobs, promoteJob } = require('./queue');
 require('dotenv').config();
 
 const app = express();
@@ -149,6 +149,30 @@ app.get('/queue/job/:jobId', async (req, res) => {
       success: false,
       error: error.message
     });
+  }
+});
+
+// List delayed jobs (admin/debug)
+app.get('/queue/delayed', async (req, res) => {
+  try {
+    const jobs = await getJobs('delayed', 0, 100);
+    res.json({ success: true, count: jobs.length, data: jobs });
+  } catch (error) {
+    console.error('Error fetching delayed jobs:', error);
+    res.status(500).json({ success: false, error: error.message });
+  }
+});
+
+// Promote a delayed job to waiting (admin)
+app.post('/queue/promote/:jobId', async (req, res) => {
+  try {
+    const { jobId } = req.params;
+    const result = await promoteJob(jobId);
+    if (!result.success) return res.status(400).json(result);
+    res.json({ success: true, data: result });
+  } catch (error) {
+    console.error('Error promoting job:', error);
+    res.status(500).json({ success: false, error: error.message });
   }
 });
 
