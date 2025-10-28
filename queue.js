@@ -1,4 +1,8 @@
-const { Queue, Worker, QueueScheduler } = require('bullmq');
+// Import bullmq with ESM/CommonJS compatibility
+const _bullmq = require('bullmq');
+const Queue = _bullmq.Queue || _bullmq.default?.Queue;
+const Worker = _bullmq.Worker || _bullmq.default?.Worker;
+const QueueScheduler = _bullmq.QueueScheduler || _bullmq.default?.QueueScheduler;
 const { getCompletePayload } = require('./getpayload');
 const IORedis = require('ioredis');
 require('dotenv').config();
@@ -46,12 +50,62 @@ const queueOptions = {
 
 const markupQueue = new Queue(QUEUE_NAME, queueOptions);
 
-// QueueScheduler is required to handle delayed jobs and retries reliably.
-// Without it delayed jobs can remain in Redis and won't be moved to the waiting list.
-const queueScheduler = new QueueScheduler(QUEUE_NAME, { connection: redisConnection });
-queueScheduler.on('failed', (err) => {
-  console.error('❌ QueueScheduler error:', err);
-});
+// QueueScheduler is recommended to handle delayed jobs and retries reliably.
+// Create it only when available (handles possible interop issues between ESM/CJS).
+let queueScheduler = null;
+if (typeof QueueScheduler === 'function') {
+  try {
+    queueScheduler = new QueueScheduler(QUEUE_NAME, { connection: redisConnection });
+    queueScheduler.on('failed', (err) => {
+      console.error('❌ QueueScheduler error:', err);
+    });
+    console.log('⚙️  QueueScheduler started');
+  } catch (err) {
+    console.warn('⚠️  Could not start QueueScheduler:', err.message);
+    queueScheduler = null;
+  }
+} else {
+  console.warn('⚠️  QueueScheduler not available in this bullmq build - delayed jobs may not be promoted automatically');
+}
+
+// Fallback poller: if QueueScheduler isn't available, periodically check delayed jobs
+// and try to promote them (best-effort). Runs every 15 seconds.
+let fallbackPromoter = null;
+if (!queueScheduler) {
+  try {
+    fallbackPromoter = setInterval(async () => {
+      try {
+        const delayedJobs = await markupQueue.getJobs(['delayed'], 0, 100);
+        if (!delayedJobs || delayedJobs.length === 0) return;
+
+        for (const job of delayedJobs) {
+          try {
+            // If job has promotable API, and its delay has expired, promote it
+            const willRunAt = (job.timestamp || 0) + (job.opts?.delay || 0);
+            if (Date.now() >= willRunAt) {
+              if (typeof job.promote === 'function') {
+                await job.promote();
+                console.log(`⬆️  Fallback promoter: promoted job ${job.id}`);
+              } else {
+                // Can't promote programmatically on this build; log for manual action
+                console.warn(`⚠️  Fallback promoter: job ${job.id} delayed but promote() not available`);
+              }
+            }
+          } catch (err) {
+            console.warn('⚠️  Error promoting job in fallback promoter:', err.message);
+          }
+        }
+      } catch (err) {
+        console.warn('⚠️  Fallback promoter error while fetching delayed jobs:', err.message);
+      }
+    }, 15 * 1000);
+
+    console.log('⚙️  Fallback promoter started (every 15s)');
+  } catch (err) {
+    console.warn('⚠️  Could not start fallback promoter:', err.message);
+    fallbackPromoter = null;
+  }
+}
 
 // ============================================================================
 // WORKER CONFIGURATION
@@ -210,6 +264,10 @@ markupQueue.on('error', (err) => {
 // QUEUE MANAGEMENT FUNCTIONS
 // ============================================================================
 
+// In-process scheduled jobs fallback (used when QueueScheduler is unavailable)
+const localScheduled = new Map(); // jobId -> { timer, url, willProcessAt }
+
+
 /**
  * Add a scraping job to the queue with deduplication
  * If the same URL is already in queue, it will be delayed by 3 minutes
@@ -220,40 +278,90 @@ markupQueue.on('error', (err) => {
  */
 async function addScrapingJob(url, options = {}) {
   try {
-    // Check if job with this URL already exists in queue (waiting or delayed)
-    const existingJobs = await markupQueue.getJobs(['waiting', 'delayed', 'active']);
-    const existingJob = existingJobs.find(job => job.data.url === url);
-    
-    if (existingJob) {
-      console.log(`\n⏸️  Job for URL already exists: ${existingJob.id}`);
-      console.log(`🔄 Removing old job and creating new one with 3-minute delay`);
-      
-      // Remove the existing job
-      await existingJob.remove();
-    }
-    
-    // Add new job with 3-minute delay
-    const job = await markupQueue.add(
-      'scrape-markup',
-      { url, options },
-      {
-        jobId: `markup-${Buffer.from(url).toString('base64').substring(0, 50)}`, // Unique ID based on URL
-        delay: 3 * 60 * 1000, // 3 minutes delay
-        priority: 1, // Default priority
+    const DELAY_MS = 3 * 60 * 1000; // 3 minutes
+    const jobId = `markup-${Buffer.from(url).toString('base64').substring(0, 50)}`;
+
+    // If QueueScheduler is available, rely on Redis delayed jobs as before
+    if (queueScheduler) {
+      // Remove any existing duplicate jobs (waiting/delayed/active)
+      const existingJobs = await markupQueue.getJobs(['waiting', 'delayed', 'active']);
+      const existingJob = existingJobs.find(job => job.data.url === url);
+      if (existingJob) {
+        console.log(`\n⏸️  Job for URL already exists: ${existingJob.id}`);
+        console.log(`🔄 Removing old job and creating new one with 3-minute delay`);
+        await existingJob.remove();
       }
-    );
-    
-    console.log(`\n✅ Job added to queue: ${job.id}`);
+
+      const job = await markupQueue.add(
+        'scrape-markup',
+        { url, options },
+        {
+          jobId: jobId,
+          delay: DELAY_MS,
+          priority: 1,
+        }
+      );
+
+      console.log(`\n✅ Job added to queue: ${job.id}`);
+      console.log(`📍 URL: ${url}`);
+      console.log(`⏰ Will start processing in 3 minutes at: ${new Date(Date.now() + DELAY_MS).toISOString()}`);
+
+      return {
+        success: true,
+        jobId: job.id,
+        url: url,
+        status: 'delayed',
+        delay: DELAY_MS,
+        willProcessAt: new Date(Date.now() + DELAY_MS).toISOString(),
+      };
+    }
+
+    // Fallback: schedule locally (process will set timer and add job without delay when triggered)
+    // Remove any existing Redis job with the same id
+    try {
+      const existing = await markupQueue.getJob(jobId);
+      if (existing) {
+        console.log(`\n⏸️  Removing leftover Redis job: ${existing.id}`);
+        await existing.remove();
+      }
+    } catch (err) {
+      console.warn('⚠️  Could not remove existing Redis job:', err.message);
+    }
+
+    // Clear existing local timer for this job if present
+    if (localScheduled.has(jobId)) {
+      const prev = localScheduled.get(jobId);
+      clearTimeout(prev.timer);
+      localScheduled.delete(jobId);
+      console.log(`🔁 Resetting local schedule for ${jobId}`);
+    }
+
+    const willProcessAt = Date.now() + DELAY_MS;
+    const timer = setTimeout(async () => {
+      try {
+        // Add job without delay so worker can pick it up immediately
+        const added = await markupQueue.add('scrape-markup', { url, options }, { jobId: jobId, priority: 1 });
+        console.log(`\n✅ Locally-scheduled job added to queue: ${added.id}`);
+      } catch (err) {
+        console.error('❌ Error adding locally scheduled job to queue:', err.message);
+      } finally {
+        localScheduled.delete(jobId);
+      }
+    }, DELAY_MS);
+
+    // Track local schedule
+    localScheduled.set(jobId, { timer, url, willProcessAt });
+
+    console.log(`\n🕒 Job scheduled locally: ${jobId}`);
     console.log(`📍 URL: ${url}`);
-    console.log(`⏰ Will start processing in 3 minutes at: ${new Date(Date.now() + 3 * 60 * 1000).toISOString()}`);
-    
+    console.log(`⏰ Will start processing at: ${new Date(willProcessAt).toISOString()}`);
+
     return {
       success: true,
-      jobId: job.id,
+      jobId: jobId,
       url: url,
-      status: 'delayed',
-      delay: 3 * 60 * 1000,
-      willProcessAt: new Date(Date.now() + 3 * 60 * 1000).toISOString(),
+      status: 'scheduled_locally',
+      willProcessAt: new Date(willProcessAt).toISOString(),
     };
     
   } catch (error) {
@@ -407,6 +515,30 @@ async function removeJob(jobId) {
 }
 
 /**
+ * Promote a delayed job to waiting immediately (if supported)
+ */
+async function promoteJob(jobId) {
+  try {
+    const job = await markupQueue.getJob(jobId);
+    if (!job) {
+      return { success: false, error: 'Job not found' };
+    }
+
+    // Some bullmq builds expose job.promote(); check and call if available
+    if (typeof job.promote === 'function') {
+      await job.promote();
+      console.log(`⬆️  Job ${jobId} promoted to waiting`);
+      return { success: true, jobId: job.id, message: 'Job promoted to waiting' };
+    }
+
+    return { success: false, error: 'Promote operation not supported by this bullmq build' };
+  } catch (error) {
+    console.error('❌ Error promoting job:', error);
+    throw error;
+  }
+}
+
+/**
  * Clean old jobs from queue
  */
 async function cleanQueue(grace = 24 * 3600 * 1000) {
@@ -452,8 +584,17 @@ async function closeQueue() {
   console.log('\n🔄 Closing queue connections...');
   
   await worker.close();
-  // Close the queue scheduler first
-  try { await queueScheduler.close(); } catch (err) { console.warn('Error closing QueueScheduler:', err.message); }
+  // Close the queue scheduler first (if created)
+  if (queueScheduler && typeof queueScheduler.close === 'function') {
+    try { await queueScheduler.close(); } catch (err) { console.warn('Error closing QueueScheduler:', err.message); }
+  }
+  // Stop fallback promoter if running
+  if (fallbackPromoter) {
+    clearInterval(fallbackPromoter);
+    fallbackPromoter = null;
+    console.log('🛑 Fallback promoter stopped');
+  }
+
   await markupQueue.close();
   await redisConnection.quit();
   
@@ -483,12 +624,14 @@ process.on('SIGINT', async () => {
 module.exports = {
   markupQueue,
   worker,
-  queueScheduler,
+  // Export scheduler only if it exists
+  ...(queueScheduler ? { queueScheduler } : {}),
   addScrapingJob,
   getJobStatus,
   getQueueStats,
   getJobs,
   retryJob,
+  promoteJob,
   removeJob,
   cleanQueue,
   pauseQueue,
