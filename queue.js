@@ -1,4 +1,4 @@
-const { Queue, Worker } = require('bullmq');
+const { Queue, Worker, QueueScheduler } = require('bullmq');
 const { getCompletePayload } = require('./getpayload');
 const IORedis = require('ioredis');
 require('dotenv').config();
@@ -46,8 +46,12 @@ const queueOptions = {
 
 const markupQueue = new Queue(QUEUE_NAME, queueOptions);
 
-// Note: In BullMQ v5+, QueueScheduler is no longer needed
-// The queue handles delayed jobs automatically
+// QueueScheduler is required to handle delayed jobs and retries reliably.
+// Without it delayed jobs can remain in Redis and won't be moved to the waiting list.
+const queueScheduler = new QueueScheduler(QUEUE_NAME, { connection: redisConnection });
+queueScheduler.on('failed', (err) => {
+  console.error('❌ QueueScheduler error:', err);
+});
 
 // ============================================================================
 // WORKER CONFIGURATION
@@ -448,6 +452,8 @@ async function closeQueue() {
   console.log('\n🔄 Closing queue connections...');
   
   await worker.close();
+  // Close the queue scheduler first
+  try { await queueScheduler.close(); } catch (err) { console.warn('Error closing QueueScheduler:', err.message); }
   await markupQueue.close();
   await redisConnection.quit();
   
@@ -477,6 +483,7 @@ process.on('SIGINT', async () => {
 module.exports = {
   markupQueue,
   worker,
+  queueScheduler,
   addScrapingJob,
   getJobStatus,
   getQueueStats,
