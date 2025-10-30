@@ -1,4 +1,4 @@
-const puppeteer = require('puppeteer');
+const { chromium } = require('playwright');
 const { MarkupScreenshotter } = require('./db_helper.js');
 const SupabaseService = require('./supabase-service.js');
 
@@ -162,7 +162,7 @@ async function extractThreadDataFromPage(page) {
   // Collect attachments first by navigating through image sidebar
   const attachmentsByThread = await collectAttachmentsFromAllThreads(page);
 
-  // Puppeteer-based extraction for comments
+  // Playwright-based extraction for comments
   const threadsByName = {};
   const threadListHandle = await page.$('div.thread-list');
   if (!threadListHandle) return { projectName: projectName || "Unknown Project", threads: [] };
@@ -289,12 +289,12 @@ async function takeScreenshotsFromPage(existingPage, url, numberOfImages, thread
     });
     
     screenshotter.page = existingPage;
-    screenshotter.browser = existingPage.browser();
+    screenshotter.browser = existingPage.context().browser();
     screenshotter.currentUrl = url;
     screenshotter.sessionId = sessionId;
     screenshotter.currentTitle = await existingPage.title();
     
-    await existingPage.setViewport(screenshotter.options.viewport);
+    await existingPage.setViewportSize(screenshotter.options.viewport);
     existingPage.setDefaultTimeout(screenshotter.options.timeout);
     existingPage.setDefaultNavigationTimeout(screenshotter.options.timeout);
     
@@ -410,7 +410,7 @@ async function getCompletePayload(url, options = {}) {
   const sessionId = supabaseService.initializeSession();
   
   try {
-    browser = await puppeteer.launch({
+    browser = await chromium.launch({
       headless: true,
       args: [
         '--no-sandbox',
@@ -423,13 +423,19 @@ async function getCompletePayload(url, options = {}) {
       ]
     });
     
-    const page = await browser.newPage();
-    await page.setViewport({ width: 1920, height: 1080 });
+    const context = await browser.newContext({
+      viewport: { width: 1920, height: 1080 }
+    });
+    const page = await context.newPage();
     page.setDefaultTimeout(80000);
     page.setDefaultNavigationTimeout(80000);
     
     console.log(`🌐 Navigating to: ${url}`);
-    await page.goto(url, { waitUntil: 'networkidle2', timeout: 80000 });
+    // Use 'load' instead of 'networkidle' for better reliability with Playwright
+    await page.goto(url, { waitUntil: 'load', timeout: 80000 });
+    
+    // Wait a bit for any dynamic content to load
+    await new Promise(resolve => setTimeout(resolve, 3000));
     
     console.log('📝 Extracting thread data...');
     let threadData;

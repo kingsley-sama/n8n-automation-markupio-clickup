@@ -1,4 +1,4 @@
-const puppeteer = require('puppeteer');
+const { chromium } = require('playwright');
 const SupabaseService = require('./supabase-service');
 require('dotenv').config();
 
@@ -122,11 +122,11 @@ class MarkupScreenshotter {
       ]
     };
 
-    this.browser = await puppeteer.launch(launchOptions);
-    this.page = await this.browser.newPage();
-    
-    // Set viewport
-    await this.page.setViewport(this.options.viewport);
+    this.browser = await chromium.launch(launchOptions);
+    const context = await this.browser.newContext({
+      viewport: this.options.viewport
+    });
+    this.page = await context.newPage();
     
     // Set longer timeout for navigation
     this.page.setDefaultTimeout(this.options.timeout);
@@ -141,10 +141,14 @@ class MarkupScreenshotter {
     this.currentUrl = url;
     await this.retry(async () => {
       this.log(`Navigating to: ${url}`);
+      // Use 'load' instead of 'networkidle' for better reliability with Playwright
       await this.page.goto(url, {
-        waitUntil: 'networkidle2',
+        waitUntil: 'load',
         timeout: this.options.timeout
       });
+      
+      // Wait a bit for any dynamic content to load
+      await this.delay(2000);
       
       // Get page title
       this.currentTitle = await this.page.title();
@@ -169,10 +173,12 @@ class MarkupScreenshotter {
 
     for (const selector of overlaySelectors) {
       try {
-        await this.page.waitForSelector(selector, { timeout: 3000 });
-        await this.page.click(selector);
-        this.log(`Clicked overlay button: ${selector}`, 'success');
-        await this.delay(1000);
+        const element = await this.page.waitForSelector(selector, { timeout: 3000, state: 'visible' });
+        if (element) {
+          await element.click();
+          this.log(`Clicked overlay button: ${selector}`, 'success');
+          await this.delay(1000);
+        }
       } catch (e) {
         // Continue to next selector
         if (this.options.debugMode) {
@@ -185,10 +191,51 @@ class MarkupScreenshotter {
   async waitForImageContainer() {
     await this.retry(async () => {
       this.log('Waiting for image container...');
+      
+      // First wait for the element to be attached to DOM
       await this.page.waitForSelector(SELECTORS.imageContainer, { 
-        timeout: 45000, // Increased to 45 seconds
-        visible: true 
+        timeout: 45000,
+        state: 'attached'
       });
+      
+      // Then try to make it visible by scrolling or interacting
+      await this.page.evaluate((selector) => {
+        const container = document.querySelector(selector);
+        if (container) {
+          container.scrollIntoView({ behavior: 'smooth', block: 'center' });
+          // Force display if hidden
+          if (container.style.display === 'none') {
+            container.style.display = 'block';
+          }
+          if (container.style.visibility === 'hidden') {
+            container.style.visibility = 'visible';
+          }
+        }
+      }, SELECTORS.imageContainer);
+      
+      // Wait a bit for the container to become visible
+      await this.delay(2000);
+      
+      // Finally verify it's visible
+      const isVisible = await this.page.evaluate((selector) => {
+        const container = document.querySelector(selector);
+        if (!container) return false;
+        
+        const rect = container.getBoundingClientRect();
+        const style = window.getComputedStyle(container);
+        
+        return rect.width > 0 && 
+               rect.height > 0 && 
+               style.display !== 'none' && 
+               style.visibility !== 'hidden' &&
+               style.opacity !== '0';
+      }, SELECTORS.imageContainer);
+      
+      if (!isVisible) {
+        throw new Error('Image container exists but is not visible');
+      }
+      
+      this.log('Image container is now visible', 'success');
     }, 'Image container detection');
   }
 
@@ -198,7 +245,7 @@ class MarkupScreenshotter {
 
       await this.page.waitForSelector(SELECTORS.imageElements, {
         timeout: 45000,
-        visible: true
+        state: 'visible'
       });
       
       await this.page.evaluate(async (selectorList) => {
@@ -264,111 +311,116 @@ class MarkupScreenshotter {
       return;
     }
 
-    await this.retry(async () => {
-      this.log('Attempting to enable fullscreen...');
-      
-      const fullscreenSelectors = [...SELECTORS.fullscreenButtons];
-      
-      let fullscreenButton = null;
-      let usedSelector = null;
-      
-      // Try each selector until we find a visible, clickable button
-      for (const selector of fullscreenSelectors) {
-        try {
-          await this.page.waitForSelector(selector, { timeout: 2000 });
-          const button = await this.page.$(selector);
-          
-          if (button) {
-            const isClickable = await this.page.evaluate(el => {
-              const rect = el.getBoundingClientRect();
-              const style = window.getComputedStyle(el);
-              
-              return rect.width > 0 && 
-                     rect.height > 0 && 
-                     style.visibility !== 'hidden' &&
-                     style.display !== 'none' &&
-                     !el.disabled &&
-                     style.pointerEvents !== 'none';
-            }, button);
+    try {
+      await this.retry(async () => {
+        this.log('Attempting to enable fullscreen...');
+        
+        const fullscreenSelectors = [...SELECTORS.fullscreenButtons];
+        
+        let fullscreenButton = null;
+        let usedSelector = null;
+        
+        // Try each selector until we find a visible, clickable button
+        for (const selector of fullscreenSelectors) {
+          try {
+            const button = await this.page.waitForSelector(selector, { timeout: 2000, state: 'visible' });
             
-            if (isClickable) {
-              fullscreenButton = button;
-              usedSelector = selector;
-              this.log(`Found clickable fullscreen button: ${selector}`, 'success');
-              break;
+            if (button) {
+              const isClickable = await button.evaluate(el => {
+                const rect = el.getBoundingClientRect();
+                const style = window.getComputedStyle(el);
+                
+                return rect.width > 0 && 
+                       rect.height > 0 && 
+                       style.visibility !== 'hidden' &&
+                       style.display !== 'none' &&
+                       !el.disabled &&
+                       style.pointerEvents !== 'none';
+              });
+              
+              if (isClickable) {
+                fullscreenButton = button;
+                usedSelector = selector;
+                this.log(`Found clickable fullscreen button: ${selector}`, 'success');
+                break;
+              }
+            }
+          } catch (e) {
+            // Continue to next selector
+            if (this.options.debugMode) {
+              this.log(`Selector not found: ${selector}`, 'debug');
             }
           }
-        } catch (e) {
-          // Continue to next selector
-          if (this.options.debugMode) {
-            this.log(`Selector not found: ${selector}`, 'debug');
+        }
+        
+        if (!fullscreenButton) {
+          this.log('⚠️  No fullscreen button found, page may already be in fullscreen or button not available', 'warn');
+          return; // Don't throw error, just return
+        }
+        
+        // Click the fullscreen button with retry logic
+        await this.page.evaluate((selector) => {
+          const button = document.querySelector(selector);
+          if (button) {
+            button.scrollIntoView({ behavior: 'smooth', block: 'center' });
           }
-        }
-      }
-      
-      if (!fullscreenButton) {
-        throw new Error('No clickable fullscreen button found');
-      }
-      
-      // Click the fullscreen button with retry logic
-      await this.page.evaluate((selector) => {
-        const button = document.querySelector(selector);
-        if (button) {
-          button.scrollIntoView({ behavior: 'smooth', block: 'center' });
-        }
-      }, usedSelector);
-      
-      await this.delay(500); // Wait for scroll
-      
-      await fullscreenButton.click();
-      this.log('Fullscreen button clicked successfully', 'success');
-      
-      // Wait for fullscreen transition
-      await this.delay(3000);
-      
-      // Enhanced fullscreen state verification including scrollable canvas
-      const fullscreenStatus = await this.page.evaluate((selector) => {
-        // Standard fullscreen checks
-        const isDocumentFullscreen = document.fullscreenElement !== null || 
-                                   document.webkitFullscreenElement !== null;
-        const isBodyFullscreen = document.body.classList.contains('fullscreen');
-        const isViewportFullscreen = window.innerHeight === screen.height;
+        }, usedSelector);
         
-        // Check for scrollable canvas specific indicators
-        const scrollableCanvas = document.querySelector(selector);
-        let scrollableCanvasFullscreen = false;
+        await this.delay(500); // Wait for scroll
         
-        if (scrollableCanvas) {
-          // Check if scrollable canvas or its container has fullscreen indicators
-          scrollableCanvasFullscreen = scrollableCanvas.closest('[class*="fullscreen"]') !== null ||
-                                     scrollableCanvas.classList.contains('fullscreen') ||
-                                     scrollableCanvas.parentElement?.classList.contains('fullscreen') ||
-                                     // Check if the canvas takes up most of the viewport
-                                     (scrollableCanvas.getBoundingClientRect().width > window.innerWidth * 0.8 &&
-                                      scrollableCanvas.getBoundingClientRect().height > window.innerHeight * 0.8);
+        await fullscreenButton.click();
+        this.log('Fullscreen button clicked successfully', 'success');
+        
+        // Wait for fullscreen transition
+        await this.delay(3000);
+        
+        // Enhanced fullscreen state verification including scrollable canvas
+        const fullscreenStatus = await this.page.evaluate((selector) => {
+          // Standard fullscreen checks
+          const isDocumentFullscreen = document.fullscreenElement !== null || 
+                                     document.webkitFullscreenElement !== null;
+          const isBodyFullscreen = document.body.classList.contains('fullscreen');
+          const isViewportFullscreen = window.innerHeight === screen.height;
+          
+          // Check for scrollable canvas specific indicators
+          const scrollableCanvas = document.querySelector(selector);
+          let scrollableCanvasFullscreen = false;
+          
+          if (scrollableCanvas) {
+            // Check if scrollable canvas or its container has fullscreen indicators
+            scrollableCanvasFullscreen = scrollableCanvas.closest('[class*="fullscreen"]') !== null ||
+                                       scrollableCanvas.classList.contains('fullscreen') ||
+                                       scrollableCanvas.parentElement?.classList.contains('fullscreen') ||
+                                       // Check if the canvas takes up most of the viewport
+                                       (scrollableCanvas.getBoundingClientRect().width > window.innerWidth * 0.8 &&
+                                        scrollableCanvas.getBoundingClientRect().height > window.innerHeight * 0.8);
+          }
+          
+          return {
+            isDocumentFullscreen,
+            isBodyFullscreen,
+            isViewportFullscreen,
+            hasScrollableCanvas: !!scrollableCanvas,
+            scrollableCanvasFullscreen,
+            overallFullscreen: isDocumentFullscreen || isBodyFullscreen || isViewportFullscreen || scrollableCanvasFullscreen
+          };
+        }, SELECTORS.scrollableCanvas);
+        
+        if (fullscreenStatus.overallFullscreen) {
+          this.log('✅ Fullscreen mode confirmed', 'success');
+          if (fullscreenStatus.hasScrollableCanvas) {
+            this.log(`📱 Scrollable canvas detected${fullscreenStatus.scrollableCanvasFullscreen ? ' (in fullscreen)' : ''}`, 'info');
+          }
+        } else {
+          this.log('⚠️  Fullscreen mode not detected, but continuing...', 'warn');
+          this.log(`Debug: ${JSON.stringify(fullscreenStatus)}`, 'debug');
         }
         
-        return {
-          isDocumentFullscreen,
-          isBodyFullscreen,
-          isViewportFullscreen,
-          hasScrollableCanvas: !!scrollableCanvas,
-          scrollableCanvasFullscreen,
-          overallFullscreen: isDocumentFullscreen || isBodyFullscreen || isViewportFullscreen || scrollableCanvasFullscreen
-        };
-      }, SELECTORS.scrollableCanvas);
-      
-      if (fullscreenStatus.overallFullscreen) {
-        this.log('✅ Fullscreen mode confirmed', 'success');
-        if (fullscreenStatus.hasScrollableCanvas) {
-          this.log(`📱 Scrollable canvas detected${fullscreenStatus.scrollableCanvasFullscreen ? ' (in fullscreen)' : ''}`, 'info');
-        }
-      } else {
-        this.log('⚠️  Fullscreen mode not detected, but continuing...', 'warn');
-        this.log(`Debug: ${JSON.stringify(fullscreenStatus)}`, 'debug');
-      }
-      
-    }, 'Fullscreen activation', 2); // Only retry twice for fullscreen
+      }, 'Fullscreen activation', 2); // Only retry twice for fullscreen
+    } catch (error) {
+      // If fullscreen completely fails, log but don't throw - continue with the scraping
+      this.log(`⚠️  Fullscreen failed: ${error.message}`, 'warn');
+    }
   }
 
   async takeScreenshot(filename) {
@@ -492,7 +544,7 @@ class MarkupScreenshotter {
           // Set viewport height to be larger for better full-page capture
           const newViewportHeight = Math.min(pageInfo.documentHeight, 4000); // Cap at 4000px to avoid memory issues
           
-          await this.page.setViewport({
+          await this.page.setViewportSize({
             width: this.options.viewport.width,
             height: newViewportHeight
           });
@@ -503,11 +555,11 @@ class MarkupScreenshotter {
           await this.delay(2000);
         }
         
-        // Use Puppeteer's built-in fullPage option - it handles scrolling automatically
+        // Use Playwright's built-in fullPage option
         const screenshotOptions = {
           type: 'jpeg',
           quality: this.options.screenshotQuality,
-          fullPage: true  // ✅ Puppeteer automatically scrolls and captures entire page
+          fullPage: true
         };
         
         this.log(`Taking full page screenshot with options: ${JSON.stringify(screenshotOptions)}`, 'debug');
@@ -563,11 +615,10 @@ class MarkupScreenshotter {
       // Find clickable next button
       for (const selector of nextButtonSelectors) {
         try {
-          await this.page.waitForSelector(selector, { timeout: 2000 });
-          const button = await this.page.$(selector);
+          const button = await this.page.waitForSelector(selector, { timeout: 2000, state: 'visible' });
           
           if (button) {
-            const isClickable = await this.page.evaluate(el => {
+            const isClickable = await button.evaluate(el => {
               const rect = el.getBoundingClientRect();
               const style = window.getComputedStyle(el);
               
@@ -577,7 +628,7 @@ class MarkupScreenshotter {
                      style.display !== 'none' &&
                      !el.disabled &&
                      style.pointerEvents !== 'none';
-            }, button);
+            });
             
             if (isClickable) {
               nextButton = button;
@@ -731,7 +782,7 @@ class MarkupScreenshotter {
         return await this.captureScrollableCanvasWithStitching(scrollableInfo);
       }
 
-      const originalViewport = this.page.viewport();
+      const originalViewport = this.page.viewportSize();
       let viewportAdjusted = false;
       let canvasElement = null;
       let screenshotBuffer = null;
@@ -851,7 +902,7 @@ class MarkupScreenshotter {
 
         if (targetViewport.width !== originalViewport.width || targetViewport.height !== originalViewport.height) {
           this.log(`📐 Temporarily adjusting viewport to ${targetViewport.width}x${targetViewport.height} for capture`, 'info');
-          await this.page.setViewport(targetViewport);
+          await this.page.setViewportSize(targetViewport);
           viewportAdjusted = true;
           await this.delay(500);
         }
@@ -912,7 +963,7 @@ class MarkupScreenshotter {
         }, SELECTORS.scrollableCanvas);
 
         if (viewportAdjusted) {
-          await this.page.setViewport(originalViewport);
+          await this.page.setViewportSize(originalViewport);
           await this.delay(200);
         }
       }
@@ -976,7 +1027,7 @@ class MarkupScreenshotter {
     const expandedWidth = Math.min(scrollWidth + 200, 6000);
     const expandedHeight = Math.min(scrollHeight + 200, 10000);
     
-    await this.page.setViewport({
+    await this.page.setViewportSize({
       width: expandedWidth,
       height: expandedHeight
     });
@@ -1085,9 +1136,17 @@ class MarkupScreenshotter {
       // Navigate and prepare page
       await this.navigateToPage(url);
       await this.handleOverlays();
+      
+      // Try to enable fullscreen first - this might make the image container visible
+      try {
+        await this.enableFullscreen();
+      } catch (error) {
+        this.log(`⚠️  Could not enable fullscreen (continuing anyway): ${error.message}`, 'warn');
+      }
+      
+      // Now wait for image container and images to load
       await this.waitForImageContainer();
       await this.waitForImagesLoad();
-      await this.enableFullscreen();
       
       // Additional wait for everything to settle
       await this.delay(2000);
